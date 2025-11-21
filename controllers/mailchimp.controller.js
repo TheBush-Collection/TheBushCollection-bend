@@ -2,10 +2,13 @@
  * Mailchimp integration controller
  * Handles all Mailchimp-related operations on the backend
  */
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 // Mailchimp credentials (store these in .env file in production)
-const MAILCHIMP_API_KEY = '4e78d7b5098e00d5b4ee1438e13a9959-us14';
-const MAILCHIMP_SERVER_PREFIX = 'us14';
+const MAILCHIMP_API_KEY = process.env.MAILCHIMP_API_KEY;
+const MAILCHIMP_SERVER_PREFIX = process.env.MAILCHIMP_SERVER_PREFIX;
 // Get your Audience ID from Mailchimp dashboard -> Audience -> Settings -> Audience name and defaults
 const MAILCHIMP_AUDIENCE_ID = process.env.MAILCHIMP_AUDIENCE_ID || '';
 
