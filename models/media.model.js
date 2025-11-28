@@ -5,6 +5,7 @@ const mediaSchema = new mongoose.Schema({
   type: { type: String, enum: ["image", "video"], required: true },
   category: { type: String, enum: ["Wildlife", "Landscapes", "Culture", "Accommodations", "Activities", "Safari experience"] },
   thumbnailUrl: String,
+  fileUrl: String,
   description: String,
   featured: { type: Boolean, default: false }
 }, { timestamps: true });

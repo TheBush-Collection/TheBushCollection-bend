@@ -1,7 +1,8 @@
 import express from "express";
 import {
   createBooking, listBookings, getBooking, getBookingByRef, generateReceipt,
-  setDepositPaid, setConfirmed, setFullyPaid, reopenBooking, cancelBooking
+  setDepositPaid, setConfirmed, setFullyPaid, reopenBooking, cancelBooking, notifyBooking,
+  listUserBookings, sendReceiptEmail
 } from "../controllers/booking.controller.js";
 import { protectAdmin, protectUser } from "../middleware/auth.js";
 
@@ -158,6 +159,9 @@ router.get("/receipt/:bookingId", protectUser, generateReceipt);
  *         description: Unauthorized
  */
 router.get("/admin/bookings", protectAdmin, listBookings);
+
+// User: list bookings for authenticated user
+router.get('/my', protectUser, listUserBookings);
 
 /**
  * @swagger
@@ -333,6 +337,9 @@ router.post("/admin/bookings/:id/reopen", protectAdmin, reopenBooking);
  */
 router.post("/admin/bookings/:id/cancel", protectAdmin, cancelBooking);
 
+// Admin: manually trigger/send a notification for a booking (e.g., resend confirmation)
+router.post('/admin/bookings/:id/notify', protectAdmin, notifyBooking);
+
 /**
  * @openapi
  * /bookings/:id/cancel:
@@ -356,5 +363,11 @@ router.post("/admin/bookings/:id/cancel", protectAdmin, cancelBooking);
  *         description: Booking not found
  */
 router.post("/:id/cancel", protectUser, cancelBooking);
+
+// User: request a notification resend for a booking they own
+router.post('/:id/notify', protectUser, notifyBooking);
+
+// Send receipt email (public; validates provided email matches booking.customerEmail)
+router.post('/:id/email', sendReceiptEmail);
 
 export default router;

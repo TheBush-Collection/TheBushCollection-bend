@@ -3,6 +3,7 @@ import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import swaggerUi from "swagger-ui-express";
+import path from "path";
 import {connectDB} from "./config/db.js";
 import swaggerSpec from "./config/swagger.js";
 
@@ -27,6 +28,12 @@ connectDB();
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Serve uploaded media files
+app.use(
+	'/uploads',
+	express.static(path.join(process.cwd(), 'public', 'uploads'))
+);
 
 // Swagger Documentation
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));

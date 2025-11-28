@@ -76,6 +76,22 @@ const options = {
             updatedAt: { type: "string", format: "date-time" },
           },
         },
+        Media: {
+          type: "object",
+          required: ["title", "type"],
+          properties: {
+            _id: { type: "string" },
+            title: { type: "string" },
+            type: { type: "string", enum: ["image", "video"] },
+            category: { type: "string", enum: ["Wildlife", "Landscapes", "Culture", "Accommodations", "Activities", "Safari experience"] },
+            thumbnailUrl: { type: "string" },
+            fileUrl: { type: "string" },
+            description: { type: "string" },
+            featured: { type: "boolean" },
+            createdAt: { type: "string", format: "date-time" },
+            updatedAt: { type: "string", format: "date-time" }
+          }
+        },
         Property: {
           type: "object",
           required: ["name"],

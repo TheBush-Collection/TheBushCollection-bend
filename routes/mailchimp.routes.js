@@ -9,6 +9,7 @@ import {
   getContact,
   unsubscribeContact
 } from '../controllers/mailchimp.controller.js';
+import { mandrillQuery } from '../controllers/mailchimp.controller.js';
 
 const router = express.Router();
 
@@ -30,5 +31,11 @@ router.get('/contact', getContact);
  * Unsubscribe/delete a contact from Mailchimp
  */
 router.post('/unsubscribe', unsubscribeContact);
+
+/**
+ * GET /api/mailchimp/mandrill
+ * Query: ?id=<mandrill_message_id> OR ?recipient=<email>
+ */
+router.get('/mandrill', mandrillQuery);
 
 export default router;
