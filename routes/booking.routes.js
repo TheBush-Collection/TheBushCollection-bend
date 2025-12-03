@@ -1,7 +1,7 @@
 import express from "express";
 import {
   createBooking, listBookings, getBooking, getBookingByRef, generateReceipt,
-  setDepositPaid, setConfirmed, setFullyPaid, reopenBooking, cancelBooking, notifyBooking,
+  setDepositPaid, setConfirmed, setFullyPaid, setCompleted, reopenBooking, cancelBooking, notifyBooking,
   listUserBookings, sendReceiptEmail
 } from "../controllers/booking.controller.js";
 import { protectAdmin, protectUser } from "../middleware/auth.js";
@@ -278,6 +278,9 @@ router.post("/admin/bookings/:id/confirm", protectAdmin, setConfirmed);
  *         description: Booking not found
  */
 router.post("/admin/bookings/:id/paid", protectAdmin, setFullyPaid);
+
+// Admin: mark booking as completed (check-in)
+router.post("/admin/bookings/:id/complete", protectAdmin, setCompleted);
 
 /**
  * @swagger

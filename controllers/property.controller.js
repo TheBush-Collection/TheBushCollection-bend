@@ -39,7 +39,52 @@ export const createProperty = async (req, res) => {
 
 export const updateProperty = async (req, res) => {
   try {
-    const prop = await Property.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    // Normalize incoming fields so images, videos and amenities are always arrays
+    const {
+      name, location, description, type, basePricePerNight,
+      maxGuests, rating, numReviews, amenities, images, videos, featured
+    } = req.body;
+
+    const updateData = {};
+    if (name !== undefined) updateData.name = name;
+    if (location !== undefined) updateData.location = location;
+    if (description !== undefined) updateData.description = description;
+    if (type !== undefined) updateData.type = type;
+    if (basePricePerNight !== undefined) updateData.basePricePerNight = Number(basePricePerNight) || 0;
+    if (maxGuests !== undefined) updateData.maxGuests = Number(maxGuests) || 1;
+    if (rating !== undefined) updateData.rating = Number(rating) || 0;
+    if (numReviews !== undefined) updateData.numReviews = Number(numReviews) || 0;
+
+    // Accept either an array or a comma-separated string for these fields
+    if (amenities !== undefined) {
+      updateData.amenities = Array.isArray(amenities)
+        ? amenities.map(s => String(s).trim()).filter(Boolean)
+        : String(amenities || '').split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    if (images !== undefined) {
+      updateData.images = Array.isArray(images)
+        ? images.map(s => String(s).trim()).filter(Boolean)
+        : String(images || '').split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    if (videos !== undefined) {
+      updateData.videos = Array.isArray(videos)
+        ? videos.map(s => String(s).trim()).filter(Boolean)
+        : String(videos || '').split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    if (featured !== undefined) updateData.featured = !!featured;
+
+    // Debug log incoming media and normalized update payload
+    try {
+      console.debug('[property.controller] updateProperty req.body.images:', images);
+      console.debug('[property.controller] updateProperty updateData:', updateData);
+    } catch (e) {
+      // ignore
+    }
+
+    const prop = await Property.findByIdAndUpdate(req.params.id, updateData, { new: true });
     if (!prop) return res.status(404).json({ msg: "Property not found" });
     res.json(prop);
   } catch (err) {

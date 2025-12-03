@@ -496,6 +496,39 @@ export const setFullyPaid = async (req, res) => {
   }
 };
 
+// Admin: mark booking as completed (e.g., guest checked in)
+export const setCompleted = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) {
+      return res.status(404).json({ success: false, msg: "Booking not found" });
+    }
+
+    // Do not complete a cancelled booking
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ success: false, msg: "Cannot complete a cancelled booking" });
+    }
+
+    const updatedBooking = await Booking.findByIdAndUpdate(
+      req.params.id,
+      { status: 'completed', checkedInAt: new Date() },
+      { new: true }
+    );
+
+    res.json({ success: true, message: 'Booking marked as completed', booking: updatedBooking });
+
+    (async () => {
+      try {
+        await sendBookingNotification(updatedBooking, 'checked_in');
+      } catch (err) {
+        console.error('Mailchimp notify error (checked_in):', err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ success: false, msg: err.message });
+  }
+};
+
 export const reopenBooking = async (req, res) => {
   try {
     const booking = await Booking.findById(req.params.id);
