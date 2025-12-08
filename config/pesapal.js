@@ -15,6 +15,9 @@ if (!consumerKey || !consumerSecret) {
 
 console.log(`[PesaPal] Initialized in ${environment} mode`);
 console.log(`[PesaPal] Callback URL: ${callbackUrl}`);
+console.log("Env key loaded?:", !!consumerKey);
+console.log("Env secret loaded?:", !!consumerSecret);
+
 
 export default {
   consumerKey,

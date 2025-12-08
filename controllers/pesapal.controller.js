@@ -7,7 +7,7 @@ class PesapalController {
     constructor() {
         this.baseUrl = environment === 'live' 
             ? 'https://pay.pesapal.com/v3'
-            : 'https://cybqa.pesapal.com/v3';
+            : 'https://cybqa.pesapal.com/pesapalv3';
         this.environment = environment;
     }
 
@@ -26,12 +26,22 @@ class PesapalController {
             return response.data.token;
         } catch (error) {
             console.error('[PesaPal] Auth Error:', error.response?.data || error.message);
-            // Return a mock token for development if credentials fail
-            if (this.environment === 'sandbox') {
-                console.warn('[PesaPal] Returning mock token for sandbox development');
-                return 'mock_token_dev_' + Date.now();
+            if (error.response) {
+                console.error('[PesaPal] Auth response status:', error.response.status);
+                console.error('[PesaPal] Auth response headers:', error.response.headers);
             }
-            throw new Error('Failed to get PesaPal auth token: ' + error.message);
+            // Do NOT return a mock token — surface the real auth error so we can fix credentials/URL
+            console.error('[PesaPal] getAuthToken failed — not returning mock token.');
+            if (error.response && error.response.data) {
+                // Include response preview for debugging
+                try {
+                    const preview = typeof error.response.data === 'string' ? error.response.data.substring(0, 1000) : JSON.stringify(error.response.data).substring(0, 1000);
+                    console.error('[PesaPal] Auth response preview:', preview);
+                } catch (e) {
+                    console.error('[PesaPal] Failed to preview auth response body');
+                }
+            }
+            throw new Error('Failed to get PesaPal auth token: ' + (error.message || 'unknown'));
         }
     }
 
@@ -64,29 +74,84 @@ class PesapalController {
                 });
             }
 
-            // Check if booking exists
-            const booking = await Booking.findById(bookingId);
+            // Check if booking exists. Accept either Mongo _id or bookingId (merchant reference)
+            let booking = null;
+            if (bookingId) {
+                // Try by ObjectId first
+                try {
+                    booking = await Booking.findById(bookingId);
+                } catch (err) {
+                    booking = null;
+                }
+            }
+            // If not found by _id and a bookingId string was provided, try lookup by bookingId field
+            if (!booking && bookingId) {
+                booking = await Booking.findOne({ bookingId: bookingId });
+            }
+
             if (!booking) {
-                return res.status(404).json({
-                    success: false,
-                    error: 'Booking not found'
-                });
+                // If frontend provided a booking payload, create the booking on-the-fly
+                const bookingPayload = req.body?.bookingPayload || null;
+                if (bookingPayload && typeof bookingPayload === 'object') {
+                    try {
+                        console.log('[PesaPal] Creating booking on-the-fly for payment initiation');
+                        const created = await Booking.create(bookingPayload);
+                        booking = created;
+                        // ensure bookingId variable points to mongo id for updates
+                        // overwrite bookingId for later update operations
+                        // eslint-disable-next-line no-param-reassign
+                        req.body.bookingId = created._id.toString();
+                    } catch (createErr) {
+                        console.error('[PesaPal] Failed to create booking on-the-fly:', createErr.message || createErr);
+                        return res.status(404).json({
+                            success: false,
+                            error: 'Booking not found and auto-creation failed'
+                        });
+                    }
+                } else {
+                    return res.status(404).json({
+                        success: false,
+                        error: 'Booking not found (provide Mongo _id or bookingId reference)'
+                    });
+                }
             }
 
             const token = await this.getAuthToken();
+            // If we received a mock token (returned for local sandbox dev when auth fails),
+            // fail early so we don't call SubmitOrder with an invalid token.
+            if (typeof token === 'string' && token.startsWith('mock_token_dev_')) {
+                console.error('[PesaPal] Aborting SubmitOrder: mock auth token in use (auth likely failed).');
+                return res.status(502).json({
+                    success: false,
+                    error: 'PesaPal auth failed — mock token was returned',
+                    details: 'getAuthToken returned a mock token for sandbox development. Check PESAPAL_CONSUMER_KEY and PESAPAL_CONSUMER_SECRET and ensure the sandbox endpoint is reachable.'
+                });
+            }
             
             const orderId = randomUUID();
+            // Ensure amount is formatted as two-decimal string (e.g. "261.00")
+            const formattedAmount = (typeof amount === 'number' || !isNaN(Number(amount)))
+                ? Number(amount).toFixed(2)
+                : String(amount);
+
+            // Sanitize phone number: allow digits and leading + only
+            const sanitizedPhone = phoneNumber
+                ? String(phoneNumber).trim().replace(/[^+\d]/g, '')
+                : '';
+
             const orderData = {
                 id: orderId,
-                currency: currency || 'KES',
-                amount: parseFloat(amount),
+                currency: (currency || 'KES').toUpperCase(),
+                // PesaPal often expects a string with two decimal places
+                amount: formattedAmount,
                 description: description || `Booking Payment - ${bookingReference || bookingId}`,
                 callback_url: callbackUrl,
                 redirect_url: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/booking/confirmation`,
-                notification_id: `notify_${bookingId}`,
+                // use order-specific notification id for uniqueness
+                notification_id: `notify_${orderId}`,
                 billing_address: {
                     email_address: email,
-                    phone_number: phoneNumber || '',
+                    phone_number: sanitizedPhone,
                     first_name: firstName || 'Guest',
                     last_name: lastName || 'Booking',
                     country_code: 'KE'
@@ -94,35 +159,79 @@ class PesapalController {
             };
 
             console.log('[PesaPal] Submitting order:', orderId, 'Amount:', amount);
+            console.log('[PesaPal] orderData:', JSON.stringify(orderData));
+            console.log('[PesaPal] Using token:', token ? token.substring(0, 20) + '...' : 'no-token');
 
-            const response = await axios.post(
-                `${this.baseUrl}/api/Transactions/SubmitOrder`,
-                orderData,
-                {
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'Content-Type': 'application/json'
+            let response;
+            try {
+                response = await axios.post(
+                    `${this.baseUrl}/api/Transactions/SubmitOrder`,
+                    orderData,
+                    {
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'application/json'
+                        }
                     }
+                );
+            } catch (axiosErr) {
+                // If PesaPal returned a non-2xx status, capture their response body
+                console.error('[PesaPal] SubmitOrder request failed:', axiosErr.message);
+                if (axiosErr.response) {
+                    console.error('[PesaPal] SubmitOrder response status:', axiosErr.response.status);
+                    console.error('[PesaPal] SubmitOrder response headers:', axiosErr.response.headers);
+                    // Log body as string (may be HTML)
+                    try {
+                        const bodyStr = typeof axiosErr.response.data === 'string'
+                            ? axiosErr.response.data
+                            : JSON.stringify(axiosErr.response.data);
+                        console.error('[PesaPal] SubmitOrder response data (truncated 4000 chars):', bodyStr.substring(0, 4000));
+                    } catch (e) {
+                        console.error('[PesaPal] Failed to stringify response body');
+                    }
+
+                    return res.status(502).json({
+                        success: false,
+                        error: 'PesaPal SubmitOrder error',
+                        details: axiosErr.response.data || axiosErr.message,
+                        status: axiosErr.response.status,
+                        headers: axiosErr.response.headers
+                    });
                 }
-            );
+
+                return res.status(502).json({ success: false, error: axiosErr.message || 'PesaPal request failed' });
+            }
 
             console.log('[PesaPal] Order submitted successfully:', response.data.order_tracking_id);
+            // Log full response in sandbox for debugging
+            if (this.environment === 'sandbox') {
+                console.log('[PesaPal] SubmitOrder response:', response.data);
+            }
 
             // Store order tracking ID in booking
+            // Build embed iframe URL if a store page is configured
+            const embedPage = process.env.PESAPAL_STORE_PAGE_URL || process.env.PESAPAL_EMBED_PAGE_URL || null;
+            const embedIframeSrc = embedPage ? `https://store.pesapal.com/embed-code?pageUrl=${encodeURIComponent(embedPage)}` : null;
+
+            const paymentDetailsUpdate = {
+                pesapalOrderId: orderId,
+                orderTrackingId: response.data.order_tracking_id,
+                status: 'initiated',
+                initiatedAt: new Date(),
+                initiatedAmount: orderData.amount
+            };
+            if (embedIframeSrc) paymentDetailsUpdate.embedIframe = embedIframeSrc;
+
             await Booking.findByIdAndUpdate(bookingId, {
-                $set: {
-                    'paymentDetails.pesapalOrderId': orderId,
-                    'paymentDetails.orderTrackingId': response.data.order_tracking_id,
-                    'paymentDetails.status': 'initiated',
-                    'paymentDetails.initiatedAt': new Date()
-                }
+                $set: { 'paymentDetails': paymentDetailsUpdate }
             });
 
             return res.json({
                 success: true,
                 redirectUrl: response.data.redirect_url,
                 orderTrackingId: response.data.order_tracking_id,
-                environment: this.environment
+                environment: this.environment,
+                embedIframeSrc: embedIframeSrc
             });
 
         } catch (error) {
@@ -135,81 +244,85 @@ class PesapalController {
     }
 
     async handleCallback(req, res) {
+        // Immediate acknowledgement for IPN (respond quickly to PesaPal)
         try {
-            const { 
-                OrderTrackingId,
-                OrderMerchantReference,
-                OrderNotificationType
-            } = req.query;
+            const rawPayload = { query: req.query || {}, body: req.body || {}, headers: req.headers || {}, receivedAt: new Date() };
+            console.log('[PesaPal] IPN received (raw):', JSON.stringify(rawPayload).substring(0, 2000));
+            // Send quick 200 OK to acknowledge receipt
+            res.status(200).send('OK');
 
-            console.log('[PesaPal] Callback received:', { OrderTrackingId, OrderNotificationType });
+            // Process the callback asynchronously (do not rely on client waiting for this)
+            (async () => {
+                try {
+                    const { OrderTrackingId, OrderMerchantReference, OrderNotificationType } = rawPayload.query;
 
-            if (!OrderTrackingId) {
-                return res.status(400).json({
-                    success: false,
-                    error: 'Missing OrderTrackingId'
-                });
-            }
-
-            const token = await this.getAuthToken();
-            
-            // Get transaction status from PesaPal
-            const response = await axios.get(
-                `${this.baseUrl}/api/Transactions/GetTransactionStatus?orderTrackingId=${OrderTrackingId}`,
-                {
-                    headers: {
-                        'Authorization': `Bearer ${token}`
+                    if (!OrderTrackingId) {
+                        console.warn('[PesaPal] Callback missing OrderTrackingId - aborting async processing');
+                        return;
                     }
-                }
-            );
 
-            const { payment_status, description } = response.data;
+                    // Optionally persist raw IPN to booking (if booking known) for audit
+                    const bookingForIpn = await Booking.findOne({ 'paymentDetails.orderTrackingId': OrderTrackingId });
+                    if (bookingForIpn) {
+                        // Append to an ipn log array on the booking
+                        const ipnEntry = { payload: rawPayload, receivedAt: new Date() };
+                        await Booking.findByIdAndUpdate(bookingForIpn._id, { $push: { 'paymentDetails.ipn': ipnEntry } });
+                    }
 
-            console.log('[PesaPal] Transaction Status:', payment_status);
+                    const token = await this.getAuthToken();
 
-            // Find booking by notification ID
-            const booking = await Booking.findOne({
-                'paymentDetails.orderTrackingId': OrderTrackingId
-            });
+                    // Get transaction status from PesaPal
+                    const response = await axios.get(
+                        `${this.baseUrl}/api/Transactions/GetTransactionStatus?orderTrackingId=${OrderTrackingId}`,
+                        {
+                            headers: {
+                                'Authorization': `Bearer ${token}`
+                            }
+                        }
+                    );
 
-            if (booking) {
-                // Map PesaPal status to booking status
-                let bookingStatus = 'pending';
-                if (payment_status === 'COMPLETED') {
-                    bookingStatus = 'confirmed';
-                } else if (payment_status === 'FAILED') {
-                    bookingStatus = 'cancelled';
-                } else if (payment_status === 'PENDING') {
-                    bookingStatus = 'pending';
-                }
+                    const { payment_status } = response.data;
+                    console.log('[PesaPal] Transaction Status (async):', payment_status);
 
-                // Update booking with payment status
-                await Booking.findByIdAndUpdate(booking._id, {
-                    $set: {
+                    // Find booking by tracking ID
+                    const booking = await Booking.findOne({ 'paymentDetails.orderTrackingId': OrderTrackingId });
+                    if (!booking) {
+                        console.warn('[PesaPal] No booking found for tracking ID (async):', OrderTrackingId);
+                        return;
+                    }
+
+                    // Map status and extract amount
+                    let bookingStatus = 'pending';
+                    if (payment_status === 'COMPLETED') bookingStatus = 'confirmed';
+                    else if (payment_status === 'FAILED') bookingStatus = 'cancelled';
+
+                    const rawAmount = response.data?.amount || response.data?.payment_amount || response.data?.paid_amount || response.data?.transaction_amount || null;
+                    const amountNumeric = rawAmount != null ? Number(rawAmount) : null;
+
+                    const newAmountPaid = amountNumeric != null ? amountNumeric : (booking.amountPaid || 0);
+                    const totalDue = booking.costs?.total || booking.total || 0;
+                    const newPaymentTerm = (newAmountPaid >= totalDue && totalDue > 0) ? 'full' : (newAmountPaid > 0 ? 'deposit' : booking.paymentTerm || 'deposit');
+
+                    const updateObj = {
                         'paymentDetails.status': payment_status,
                         'paymentDetails.completedAt': new Date(),
                         'paymentDetails.pesapalResponse': response.data,
-                        status: bookingStatus
-                    }
-                });
+                        status: bookingStatus,
+                        amountPaid: newAmountPaid,
+                        paymentTerm: newPaymentTerm
+                    };
 
-                console.log(`[PesaPal] Booking ${booking._id} updated with status: ${bookingStatus}`);
-            } else {
-                console.warn('[PesaPal] No booking found for tracking ID:', OrderTrackingId);
-            }
+                    await Booking.findByIdAndUpdate(booking._id, { $set: updateObj });
+                    console.log(`[PesaPal] Booking ${booking._id} updated (async) status: ${bookingStatus}, amountPaid: ${newAmountPaid}, paymentTerm: ${newPaymentTerm}`);
 
-            return res.json({
-                success: true,
-                status: payment_status,
-                message: `Payment ${payment_status.toLowerCase()}`
-            });
+                } catch (err) {
+                    console.error('[PesaPal] Async callback processing error:', err?.message || err);
+                }
+            })();
 
         } catch (error) {
-            console.error('[PesaPal] Callback Error:', error.message);
-            return res.status(500).json({
-                success: false,
-                error: error.message || 'Failed to process payment callback'
-            });
+            console.error('[PesaPal] Callback immediate ack error:', error?.message || error);
+            try { res.status(500).json({ success: false, error: 'Failed to receive callback' }); } catch (e) { /* ignore */ }
         }
     }
 
@@ -249,6 +362,24 @@ class PesapalController {
             });
         }
     }
+
+    // DEBUG: direct auth debug endpoint (returns raw auth response or error)
+    async debugAuth(req, res) {
+        try {
+            const url = `${this.baseUrl}/api/Auth/RequestToken`;
+            const payload = {
+                consumer_key: consumerKey,
+                consumer_secret: consumerSecret
+            };
+            // Call PesaPal auth endpoint directly and return the full response
+            const resp = await axios.post(url, payload, { headers: { 'Content-Type': 'application/json' } });
+            return res.json({ success: true, data: resp.data });
+        } catch (err) {
+            const details = err.response ? (err.response.data || err.response.statusText) : err.message;
+            const status = err.response ? err.response.status : 500;
+            return res.status(status).json({ success: false, error: 'Auth request failed', details });
+        }
+    }
 }
 
 const controller = new PesapalController();
@@ -256,5 +387,6 @@ const controller = new PesapalController();
 export const submitOrder = controller.submitOrder.bind(controller);
 export const handleCallback = controller.handleCallback.bind(controller);
 export const checkPaymentStatus = controller.checkPaymentStatus.bind(controller);
+export const debugAuth = controller.debugAuth.bind(controller);
 
 export default controller;

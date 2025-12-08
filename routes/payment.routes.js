@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { submitOrder, handleCallback, checkPaymentStatus } from '../controllers/pesapal.controller.js';
+import { debugAuth } from '../controllers/pesapal.controller.js';
 import { protectUser } from '../middleware/auth.js';
 
 const router = Router();
@@ -91,6 +92,9 @@ router.post('/initiate', submitOrder);
  */
 // PesaPal callback route
 router.get('/callback', handleCallback);
+
+// Debug auth endpoint (local use only)
+router.get('/debug-auth', debugAuth);
 
 /**
  * @openapi

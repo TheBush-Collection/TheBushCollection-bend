@@ -85,7 +85,17 @@ const bookingSchema = new mongoose.Schema({
     enum: ["pending", "deposit_paid", "confirmed", "fully_paid", "cancelled"], 
     default: "pending" 
   },
-  paymentDetails: { type: Object }, // store raw payment provider response (PesaPal, etc.)
+  paymentDetails: {
+    pesapalOrderId: String,
+    orderTrackingId: String,
+    status: String,
+    initiatedAt: Date,
+    initiatedAmount: Number,
+    embedIframe: String,
+    pesapalResponse: { type: mongoose.Schema.Types.Mixed },
+    // IPN audit trail: store raw payloads received from provider
+    ipn: { type: [mongoose.Schema.Types.Mixed], default: [] }
+  }, // store raw payment provider response (PesaPal, etc.)
   
   // Booking confirmation
   confirmationNumber: String,

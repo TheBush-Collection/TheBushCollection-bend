@@ -380,9 +380,25 @@ export const setDepositPaid = async (req, res) => {
       });
     }
 
+    // Determine deposit amount: prefer explicit amount from caller, else use stored paymentSchedule or fallback to 30% of total
+    const callerAmount = req.body?.amountPaid != null ? Number(req.body.amountPaid) : null;
+    const callerPaymentDetails = req.body?.paymentDetails || null;
+    const depositAmount = callerAmount != null
+      ? callerAmount
+      : (booking.paymentSchedule && booking.paymentSchedule.depositAmount)
+        ? Number(booking.paymentSchedule.depositAmount)
+        : (booking.costs && booking.costs.total ? Math.round((booking.costs.total * 0.3 + Number.EPSILON) * 100) / 100 : 0);
+
+    const update = {
+      status: "deposit_paid",
+      amountPaid: depositAmount,
+      paymentTerm: booking.paymentTerm || 'deposit'
+    };
+    if (callerPaymentDetails) update.paymentDetails = callerPaymentDetails;
+
     const updatedBooking = await Booking.findByIdAndUpdate(
-      req.params.id, 
-      { status: "deposit_paid" }, 
+      req.params.id,
+      update,
       { new: true }
     );
 
@@ -470,9 +486,23 @@ export const setFullyPaid = async (req, res) => {
       });
     }
 
+    // Determine paid amount: prefer explicit amount from caller, else use stored costs.total
+    const callerAmount = req.body?.amountPaid != null ? Number(req.body.amountPaid) : null;
+    const callerPaymentDetails = req.body?.paymentDetails || null;
+    const paidAmount = callerAmount != null
+      ? callerAmount
+      : (booking.costs && booking.costs.total ? Number(booking.costs.total) : 0);
+
+    const update = {
+      status: "fully_paid",
+      amountPaid: paidAmount,
+      paymentTerm: 'full'
+    };
+    if (callerPaymentDetails) update.paymentDetails = callerPaymentDetails;
+
     const updatedBooking = await Booking.findByIdAndUpdate(
-      req.params.id, 
-      { status: "fully_paid" }, 
+      req.params.id,
+      update,
       { new: true }
     );
 
@@ -596,12 +626,16 @@ export const cancelBooking = async (req, res) => {
     // Store old status for audit trail
     const previousStatus = booking.status;
 
+    // Accept optional reason from request body
+    const cancellationReason = req.body?.reason || req.body?.cancellationReason || null;
+
     const updatedBooking = await Booking.findByIdAndUpdate(
       req.params.id,
       { 
         status: "cancelled",
         cancelledAt: new Date(),
-        cancelledBy: req.user?.role || 'unknown'
+        cancelledBy: req.user?.role || 'unknown',
+        cancellationReason: cancellationReason
       },
       { new: true }
     );
