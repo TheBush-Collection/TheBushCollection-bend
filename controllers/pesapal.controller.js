@@ -5,25 +5,95 @@ import Booking from '../models/booking.model.js';
 
 class PesapalController {
     constructor() {
-        this.baseUrl = environment === 'live' 
+        // Use separate bases: auth endpoints vs transactions endpoints can differ between environments
+        this.authBase = environment === 'live'
             ? 'https://pay.pesapal.com/v3'
+            : 'https://cybqa.pesapal.com/pesapalv3';
+        this.txBase = environment === 'live'
+            ? 'https://pay.pesapal.com'
             : 'https://cybqa.pesapal.com/pesapalv3';
         this.environment = environment;
     }
 
     async getAuthToken() {
         try {
-            const response = await axios.post(`${this.baseUrl}/api/Auth/RequestToken`, {
+            const url = `${this.authBase}/api/Auth/RequestToken`;
+
+            // Attempt 1: JSON POST (default)
+            let response = await axios.post(url, {
                 consumer_key: consumerKey,
                 consumer_secret: consumerSecret
             });
-            
-            if (!response.data.token) {
+            // Log response preview for diagnostics
+            try {
+                const respPreview = typeof response.data === 'string' ? response.data.substring(0, 2000) : JSON.stringify(response.data).substring(0, 2000);
+                console.log('[PesaPal] Auth response preview:', respPreview);
+            } catch (e) {
+                console.log('[PesaPal] Auth response received (unable to preview body)');
+            }
+
+            // Try common locations for token in provider responses
+            const tokenCandidates = [];
+            if (response.data) {
+                tokenCandidates.push(response.data.token, response.data.access_token);
+                // nested shapes
+                if (response.data.data) {
+                    tokenCandidates.push(response.data.data.token, response.data.data.access_token);
+                }
+                // sometimes an array is returned
+                if (Array.isArray(response.data) && response.data.length > 0) {
+                    tokenCandidates.push(response.data[0].token, response.data[0].access_token);
+                }
+            }
+
+            // Fallbacks: some sandbox endpoints expect form-encoded POST or return a token inside a string/HTML.
+            // If we didn't find a token from the JSON attempt, try form-encoded body and also regex-extraction on string responses.
+            const foundInCandidates = tokenCandidates.find(t => typeof t === 'string' && t.length > 10);
+            if (!foundInCandidates) {
+                try {
+                    const params = new URLSearchParams();
+                    params.append('consumer_key', consumerKey);
+                    params.append('consumer_secret', consumerSecret);
+                    // Try form-encoded POST
+                    const formResp = await axios.post(url, params.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+                    response = formResp;
+                    try {
+                        const respPreview2 = typeof response.data === 'string' ? response.data.substring(0, 2000) : JSON.stringify(response.data).substring(0, 2000);
+                        console.log('[PesaPal] Auth response preview (form fallback):', respPreview2);
+                    } catch (e) {
+                        console.log('[PesaPal] Auth response received (form fallback, unable to preview body)');
+                    }
+
+                    if (response.data) {
+                        tokenCandidates.push(response.data.token, response.data.access_token);
+                        if (response.data.data) {
+                            tokenCandidates.push(response.data.data.token, response.data.data.access_token);
+                        }
+                        if (Array.isArray(response.data) && response.data.length > 0) {
+                            tokenCandidates.push(response.data[0].token, response.data[0].access_token);
+                        }
+                    }
+
+                    // If still not found and response is string-ish, attempt regex extraction of a token-like substring
+                    if (!tokenCandidates.find(t => typeof t === 'string' && t.length > 10) && typeof response.data === 'string') {
+                        const s = response.data;
+                        const rx = /(?:token|access_token|accessToken|auth_token)[^A-Za-z0-9\-\._]*([A-Za-z0-9\-\._]{20,})/i;
+                        const m = s.match(rx);
+                        if (m && m[1]) tokenCandidates.push(m[1]);
+                    }
+
+                } catch (formErr) {
+                    console.warn('[PesaPal] Form-encoded auth fallback failed:', formErr.message || formErr);
+                }
+            }
+
+            const found = tokenCandidates.find(t => typeof t === 'string' && t.length > 10);
+            if (!found) {
                 throw new Error('No token in response');
             }
-            
+
             console.log(`[PesaPal] Auth token obtained (${this.environment} mode)`);
-            return response.data.token;
+            return found;
         } catch (error) {
             console.error('[PesaPal] Auth Error:', error.response?.data || error.message);
             if (error.response) {
@@ -165,7 +235,7 @@ class PesapalController {
             let response;
             try {
                 response = await axios.post(
-                    `${this.baseUrl}/api/Transactions/SubmitOrder`,
+                    `${this.txBase}/api/Transactions/SubmitOrder`,
                     orderData,
                     {
                         headers: {
@@ -273,7 +343,7 @@ class PesapalController {
 
                     // Get transaction status from PesaPal
                     const response = await axios.get(
-                        `${this.baseUrl}/api/Transactions/GetTransactionStatus?orderTrackingId=${OrderTrackingId}`,
+                        `${this.txBase}/api/Transactions/GetTransactionStatus?orderTrackingId=${OrderTrackingId}`,
                         {
                             headers: {
                                 'Authorization': `Bearer ${token}`
@@ -340,7 +410,7 @@ class PesapalController {
             const token = await this.getAuthToken();
             
             const response = await axios.get(
-                `${this.baseUrl}/api/Transactions/GetTransactionStatus?orderTrackingId=${orderTrackingId}`,
+                `${this.txBase}/api/Transactions/GetTransactionStatus?orderTrackingId=${orderTrackingId}`,
                 {
                     headers: {
                         'Authorization': `Bearer ${token}`
@@ -366,7 +436,7 @@ class PesapalController {
     // DEBUG: direct auth debug endpoint (returns raw auth response or error)
     async debugAuth(req, res) {
         try {
-            const url = `${this.baseUrl}/api/Auth/RequestToken`;
+            const url = `${this.authBase}/api/Auth/RequestToken`;
             const payload = {
                 consumer_key: consumerKey,
                 consumer_secret: consumerSecret
