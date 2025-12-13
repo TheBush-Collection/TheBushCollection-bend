@@ -324,20 +324,46 @@ class PesapalController {
                 return res.status(502).json({ success: false, error: axiosErr?.message || 'PesaPal request failed' });
             }
 
-            console.log('[PesaPal] Order submitted successfully:', response.data.order_tracking_id);
-            // Log full response in sandbox for debugging
-            if (this.environment === 'sandbox') {
-                console.log('[PesaPal] SubmitOrder response:', response.data);
+            // Normalize PesaPal response fields (providers use inconsistent names)
+            const raw = response.data || {};
+            const redirectUrl = raw.redirect_url || raw.redirectUrl || raw.checkout_url || raw.checkoutUrl || raw.redirect || raw.url || raw.payment_url || raw.paymentUrl || null;
+            const orderTrackingIdResp = raw.order_tracking_id || raw.orderTrackingId || raw.order_tracking || raw.tracking_id || raw.orderId || raw.transaction_id || null;
+
+            console.log('[PesaPal] Order submitted successfully. Raw response preview:', JSON.stringify(raw).substring(0, 2000));
+
+            // Build embed iframe URL if a store page is configured (server-side embed page)
+            const embedPage = process.env.PESAPAL_STORE_PAGE_URL || process.env.PESAPAL_EMBED_PAGE_URL || null;
+            const embedIframeSrc = embedPage ? `https://store.pesapal.com/embed-code?pageUrl=${encodeURIComponent(embedPage)}` : (raw.embedIframeSrc || raw.embed_iframe || raw.iframe_url || raw.iframeUrl || null);
+
+            // If we don't have a redirect URL or an embed iframe, return an explicit error
+            if (!redirectUrl && !embedIframeSrc) {
+                console.error('[PesaPal] No redirect or embed URL found in SubmitOrder response:', JSON.stringify(raw).substring(0, 2000));
+                // persist minimal payment details for debugging
+                const paymentDetailsUpdate = {
+                    pesapalOrderId: orderId,
+                    orderTrackingId: orderTrackingIdResp,
+                    status: 'initiated',
+                    initiatedAt: new Date(),
+                    initiatedAmount: orderData.amount,
+                    pesapalResponse: raw
+                };
+                try {
+                    await Booking.findByIdAndUpdate(bookingId, { $set: { paymentDetails: paymentDetailsUpdate } });
+                } catch (dbErr) {
+                    console.warn('[PesaPal] Failed to persist debug payment details:', dbErr.message || dbErr);
+                }
+
+                return res.status(502).json({
+                    success: false,
+                    error: 'No redirect or embed URL returned from PesaPal SubmitOrder',
+                    details: raw
+                });
             }
 
-            // Store order tracking ID in booking
-            // Build embed iframe URL if a store page is configured
-            const embedPage = process.env.PESAPAL_STORE_PAGE_URL || process.env.PESAPAL_EMBED_PAGE_URL || null;
-            const embedIframeSrc = embedPage ? `https://store.pesapal.com/embed-code?pageUrl=${encodeURIComponent(embedPage)}` : null;
-
+            // Persist order tracking id and basic payment details
             const paymentDetailsUpdate = {
                 pesapalOrderId: orderId,
-                orderTrackingId: response.data.order_tracking_id,
+                orderTrackingId: orderTrackingIdResp,
                 status: 'initiated',
                 initiatedAt: new Date(),
                 initiatedAmount: orderData.amount
@@ -350,10 +376,11 @@ class PesapalController {
 
             return res.json({
                 success: true,
-                redirectUrl: response.data.redirect_url,
-                orderTrackingId: response.data.order_tracking_id,
+                redirectUrl: redirectUrl,
+                orderTrackingId: orderTrackingIdResp,
                 environment: this.environment,
-                embedIframeSrc: embedIframeSrc
+                embedIframeSrc: embedIframeSrc,
+                pesapalRaw: raw
             });
 
         } catch (error) {
