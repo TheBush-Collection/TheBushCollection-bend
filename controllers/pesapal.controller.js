@@ -6,9 +6,17 @@ import Booking from '../models/booking.model.js';
 class PesapalController {
     constructor() {
         // Use separate bases: auth endpoints vs transactions endpoints can differ between environments
-        this.txBase = environment === 'live'
-        ? 'https://pay.pesapal.com/v3'
-        : 'https://cybqa.pesapal.com/pesapalv3';
+        // expose environment for logging
+        this.environment = environment;
+
+        // authBase vs transactions base can differ between live and sandbox
+        this.authBase = this.environment === 'live'
+            ? 'https://pay.pesapal.com'
+            : 'https://cybqa.pesapal.com/pesapalv3';
+
+        this.txBase = this.environment === 'live'
+            ? 'https://pay.pesapal.com/v3'
+            : 'https://cybqa.pesapal.com/pesapalv3';
 
     }
 
