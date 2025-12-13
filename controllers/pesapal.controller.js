@@ -268,24 +268,41 @@ class PesapalController {
             console.log('[PesaPal] Using token:', token ? token.substring(0, 20) + '...' : 'no-token');
 
             let response;
-            try {
-                response = await axios.post(
-                    `${this.txBase}/api/Transactions/SubmitOrder`,
-                    orderData,
-                    {
+            // Try multiple transaction URL variants to handle sandbox/live path differences
+            const txBaseClean = String(this.txBase || '').replace(/\/+$/g, '');
+            const txCandidates = [
+                `${txBaseClean}/api/Transactions/SubmitOrder`,
+                `${txBaseClean}/v3/api/Transactions/SubmitOrder`,
+                `${txBaseClean}/pesapalv3/api/Transactions/SubmitOrder`,
+                `${txBaseClean}/Api/Transactions/SubmitOrder`,
+                `${txBaseClean}/transactions/SubmitOrder`
+            ];
+
+            let lastAxiosErr = null;
+            for (const url of txCandidates) {
+                try {
+                    console.log('[PesaPal] Trying SubmitOrder URL:', url);
+                    response = await axios.post(url, orderData, {
                         headers: {
                             'Authorization': `Bearer ${token}`,
                             'Content-Type': 'application/json'
                         }
-                    }
-                );
-            } catch (axiosErr) {
-                // If PesaPal returned a non-2xx status, capture their response body
-                console.error('[PesaPal] SubmitOrder request failed:', axiosErr.message);
-                if (axiosErr.response) {
+                    });
+                    break;
+                } catch (axiosErr) {
+                    lastAxiosErr = axiosErr;
+                    console.warn('[PesaPal] SubmitOrder attempt failed for', url, axiosErr.response?.status || axiosErr.message);
+                    // If we get a 404 with the specific message, continue to try other candidates
+                    // otherwise keep trying but record the last error
+                }
+            }
+
+            if (!response) {
+                const axiosErr = lastAxiosErr;
+                console.error('[PesaPal] SubmitOrder request failed (all candidates):', axiosErr?.message || 'no response');
+                if (axiosErr && axiosErr.response) {
                     console.error('[PesaPal] SubmitOrder response status:', axiosErr.response.status);
                     console.error('[PesaPal] SubmitOrder response headers:', axiosErr.response.headers);
-                    // Log body as string (may be HTML)
                     try {
                         const bodyStr = typeof axiosErr.response.data === 'string'
                             ? axiosErr.response.data
@@ -304,7 +321,7 @@ class PesapalController {
                     });
                 }
 
-                return res.status(502).json({ success: false, error: axiosErr.message || 'PesaPal request failed' });
+                return res.status(502).json({ success: false, error: axiosErr?.message || 'PesaPal request failed' });
             }
 
             console.log('[PesaPal] Order submitted successfully:', response.data.order_tracking_id);
