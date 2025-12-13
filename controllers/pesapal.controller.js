@@ -22,13 +22,43 @@ class PesapalController {
 
     async getAuthToken() {
         try {
-            const url = `${this.authBase}/api/Auth/RequestToken`;
+            // Try multiple auth URL variants because sandbox/live hosts may expose the
+            // RequestToken endpoint under slightly different base paths (with or
+            // without the /pesapalv3 segment). Build candidate URLs and try each
+            // until one succeeds or all fail.
+            const base = String(this.authBase || '').replace(/\/+$/g, '');
+            const urlCandidates = [
+                `${base}/api/Auth/RequestToken`,
+                `${base}/pesapalv3/api/Auth/RequestToken`,
+                `${base}/v3/api/Auth/RequestToken`,
+                // legacy variant
+                `${base}/api/v3/Auth/RequestToken`
+            ];
 
-            // Attempt 1: JSON POST (default)
-            let response = await axios.post(url, {
-                consumer_key: consumerKey,
-                consumer_secret: consumerSecret
-            });
+            let response = null;
+            let lastErr = null;
+
+            for (const url of urlCandidates) {
+                try {
+                    console.log('[PesaPal] Trying auth URL:', url);
+                    response = await axios.post(url, {
+                        consumer_key: consumerKey,
+                        consumer_secret: consumerSecret
+                    }, { headers: { 'Content-Type': 'application/json' } });
+                    // if we get here, we have a response (may be 2xx)
+                    break;
+                } catch (e) {
+                    lastErr = e;
+                    // If 404 or other error, log and continue to next candidate
+                    console.warn('[PesaPal] Auth attempt failed for', url, e.response?.status || e.message);
+                    // continue
+                }
+            }
+
+            if (!response) {
+                // nothing worked — surface last error
+                throw lastErr || new Error('No auth response from any candidate URL');
+            }
             // Log response preview for diagnostics
             try {
                 const respPreview = typeof response.data === 'string' ? response.data.substring(0, 2000) : JSON.stringify(response.data).substring(0, 2000);
