@@ -253,7 +253,7 @@ class PesapalController {
                 callback_url: callbackUrl,
                 redirect_url: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/booking/confirmation`,
                 // use order-specific notification id for uniqueness
-                notification_id: `notify_${orderId}`,
+                notification_id: process.env.PESAPAL_IPN_ID,
                 billing_address: {
                     email_address: email,
                     phone_number: sanitizedPhone,
