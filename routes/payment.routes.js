@@ -90,6 +90,11 @@ router.post('/initiate', submitOrder);
  *                 status:
  *                   type: string
  */
+
+// Store page redirect route
+router.post("/store", submitStoreRedirect);
+
+
 // PesaPal callback route
 router.get('/callback', handleCallback);
 

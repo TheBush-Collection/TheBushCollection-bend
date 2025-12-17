@@ -392,6 +392,45 @@ class PesapalController {
         }
     }
 
+    async submitStoreRedirect(req, res) {
+        try {
+            const {
+                amount,
+                email,
+                bookingId,
+                bookingReference,
+                description
+            } = req.body;
+
+            if (!amount || !email) {
+                return res.status(400).json({
+                    success: false,
+                    error: "Missing required fields"
+                });
+            }
+
+            const url = `${process.env.PESAPAL_STORE_PAGE_URL}` +
+                `?amount=${amount}` +
+                `&reference=${bookingReference || bookingId}` +
+                `&description=${encodeURIComponent(description)}` +
+                `&email=${email}` +
+                `&currency=KES`;
+
+            return res.json({
+                success: true,
+                redirectUrl: url
+            });
+
+        } catch (err) {
+            console.error("[Pesapal] Store redirect error:", err.message);
+            return res.status(500).json({
+                success: false,
+                error: err.message || "Failed to create redirect URL"
+            });
+        }
+    }
+
+
     async handleCallback(req, res) {
         // Immediate acknowledgement for IPN (respond quickly to PesaPal)
         try {
@@ -534,6 +573,7 @@ class PesapalController {
 const controller = new PesapalController();
 
 export const submitOrder = controller.submitOrder.bind(controller);
+export const submitStoreRedirect = controller.submitStoreRedirect.bind(controller);
 export const handleCallback = controller.handleCallback.bind(controller);
 export const checkPaymentStatus = controller.checkPaymentStatus.bind(controller);
 export const debugAuth = controller.debugAuth.bind(controller);
