@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { submitOrder, handleCallback, checkPaymentStatus } from '../controllers/pesapal.controller.js';
+import { submitOrder, handleCallback, checkPaymentStatus, submitStoreRedirect } from '../controllers/pesapal.controller.js';
 import { debugAuth } from '../controllers/pesapal.controller.js';
 import { protectUser } from '../middleware/auth.js';
 
