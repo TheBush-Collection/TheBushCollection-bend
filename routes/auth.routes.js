@@ -1,5 +1,5 @@
 import express from "express";
-import { signup, login, adminLogin, me } from "../controllers/auth.controller.js";
+import { signup, login, adminLogin, me, forgotPassword, resetPassword } from "../controllers/auth.controller.js";
 const router = express.Router();
 
 /**
@@ -134,5 +134,9 @@ router.post("/admin/login", adminLogin);
  *         description: Unauthorized
  */
 router.get("/me", me);
+
+// Password reset routes
+router.post('/forgot-password', forgotPassword);
+router.post('/reset-password', resetPassword);
 
 export default router;

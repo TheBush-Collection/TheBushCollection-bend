@@ -711,6 +711,73 @@ export const generateReceipt = async (req, res) => {
       createdAt: booking.createdAt,
       generatedAt: new Date()
     };
+    // If caller requested PDF (query ?format=pdf) or Accept header prefers PDF, generate PDF and return attachment
+    const wantsPdf = (req.query && String(req.query.format || '').toLowerCase() === 'pdf') || (req.headers && String(req.headers.accept || '').includes('application/pdf'));
+    if (wantsPdf) {
+      try {
+        // Stream PDF directly to response to avoid buffering issues
+        const doc = new PDFDocument({ size: 'A4', margin: 50 });
+        const filename = `Receipt_${receipt.confirmationNumber || receipt.bookingId}.pdf`;
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+        // Pipe PDF to response and end request when done
+        doc.pipe(res);
+
+        // Header
+        doc.fillColor('#0f172a').fontSize(20).text('The Bush Collection', { align: 'center' });
+        doc.moveDown(0.5);
+        doc.fontSize(14).fillColor('#374151').text('Booking Receipt', { align: 'center' });
+        doc.moveDown(1);
+
+        // Booking / customer block
+        const left = 50;
+        const rightStart = 320;
+        doc.fontSize(10).fillColor('#111827');
+        doc.text(`Booking ID: ${receipt.bookingId}`, left, doc.y);
+        doc.text(`Confirmation: ${receipt.confirmationNumber}`, rightStart, doc.y - 12);
+        doc.moveDown(0.5);
+        doc.text(`Customer: ${receipt.customerName}`, left);
+        doc.text(`Email: ${receipt.customerEmail}`, rightStart);
+        doc.moveDown(0.5);
+
+        // Property / stay info
+        doc.fontSize(11).fillColor('#0f172a').text('Stay Information', { underline: true });
+        doc.moveDown(0.2);
+        doc.fontSize(10).fillColor('#111827');
+        doc.text(`Property: ${receipt.propertyName}`);
+        if (receipt.packageName) doc.text(`Package: ${receipt.packageName}`);
+        doc.text(`Check-in: ${receipt.checkInDate ? new Date(receipt.checkInDate).toDateString() : ''}`);
+        doc.text(`Check-out: ${receipt.checkOutDate ? new Date(receipt.checkOutDate).toDateString() : ''}`);
+        doc.text(`Nights: ${receipt.nights || 0}`);
+        doc.text(`Guests: ${receipt.totalGuests || ''}`);
+        doc.moveDown(0.5);
+
+        // Costs
+        doc.fontSize(11).fillColor('#0f172a').text('Payment Summary', { underline: true });
+        doc.moveDown(0.2);
+        doc.fontSize(10).fillColor('#111827');
+        const total = receipt.costs?.total ?? 0;
+        doc.text(`Total: KES ${Number(total).toFixed(2)}`);
+        doc.text(`Amount Paid: KES ${Number(receipt.amountPaid || 0).toFixed(2)}`);
+        if (receipt.paymentTerm === 'deposit' && receipt.paymentSchedule) {
+          doc.text(`Deposit: KES ${Number(receipt.paymentSchedule.depositAmount || 0).toFixed(2)}`);
+          doc.text(`Balance: KES ${Number(receipt.paymentSchedule.balanceAmount || 0).toFixed(2)} (due ${receipt.paymentSchedule.balanceDueDate ? new Date(receipt.paymentSchedule.balanceDueDate).toDateString() : 'N/A'})`);
+        }
+        doc.moveDown(0.5);
+
+        // Footer / thank you
+        doc.moveDown(1);
+        doc.fontSize(10).fillColor('#6b7280').text('Thank you for booking with The Bush Collection.', { align: 'center' });
+
+        // Finalize PDF and let pipe handle the response
+        doc.end();
+        return; // response will be handled by the stream
+      } catch (pdfErr) {
+        console.error('Failed to generate PDF receipt (stream):', pdfErr);
+        return res.status(500).json({ success: false, error: 'Failed to generate PDF receipt', details: String(pdfErr) });
+      }
+    }
 
     res.json({
       success: true,

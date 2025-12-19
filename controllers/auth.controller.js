@@ -2,6 +2,10 @@ import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import User from "../models/user.model.js";
 import Admin from "../models/admin.model.js";
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 
@@ -116,5 +120,102 @@ export const me = async (req, res) => {
     return res.status(401).json({ msg: "User not found" });
   } catch (err) {
     return res.status(401).json({ msg: "Invalid token" });
+  }
+};
+
+// POST /auth/forgot-password
+export const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ msg: 'Missing email' });
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const user = await User.findOne({ email: { $regex: `^${normalizedEmail}$`, $options: 'i' } });
+
+    // Always respond with success to avoid leaking registered emails
+    if (!user) return res.json({ msg: 'If an account exists, a reset link has been sent.' });
+
+    // Generate token and expiry (1 hour)
+    const token = crypto.randomBytes(20).toString('hex');
+    const expires = Date.now() + 3600000; // 1 hour
+
+    user.resetPasswordToken = token;
+    user.resetPasswordExpires = new Date(expires);
+    await user.save();
+
+    // Render email template
+    const templatePath = path.join(process.cwd(), 'templates', 'reset_password_email.html');
+    let html = '';
+    try {
+      html = fs.readFileSync(templatePath, 'utf8');
+    } catch (err) {
+      console.error('[forgotPassword] failed to read template', err);
+      html = `<p>Reset your password: <a href="${process.env.FRONTEND_URL}/reset-password?token=${token}">Reset password</a></p>`;
+    }
+
+    html = html.replace(/{{FRONTEND_URL}}/g, process.env.FRONTEND_URL || '')
+               .replace(/{{TOKEN}}/g, token);
+
+    // Send via SMTP (nodemailer)
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: parseInt(process.env.SMTP_PORT || '587', 10),
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
+
+    const from = process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@example.com';
+
+    // Verify SMTP connection before sending and log detailed outcome
+    try {
+      await transporter.verify();
+      console.log('[forgotPassword] SMTP transporter verified');
+    } catch (verifyErr) {
+      console.error('[forgotPassword] SMTP verify failed:', verifyErr && verifyErr.message ? verifyErr.message : verifyErr);
+    }
+
+    try {
+      const info = await transporter.sendMail({
+        from,
+        to: user.email,
+        subject: 'Password reset request',
+        html,
+      });
+      console.log('[forgotPassword] sendMail info:', info);
+    } catch (sendErr) {
+      console.error('[forgotPassword] sendMail error:', sendErr && sendErr.message ? sendErr.message : sendErr);
+      if (sendErr.response) console.error('[forgotPassword] sendMail response:', sendErr.response);
+    }
+
+    return res.json({ msg: 'If an account exists, a reset link has been sent.' });
+  } catch (err) {
+    console.error('forgotPassword error:', err);
+    return res.status(500).json({ msg: 'Server error' });
+  }
+};
+
+// POST /auth/reset-password
+export const resetPassword = async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ msg: 'Missing token or password' });
+
+    const user = await User.findOne({ resetPasswordToken: token, resetPasswordExpires: { $gt: new Date() } });
+    if (!user) return res.status(400).json({ msg: 'Invalid or expired token' });
+
+    user.password = password;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    // Optionally sign and return a new auth token
+    const authToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
+    return res.json({ msg: 'Password reset successful', token: authToken });
+  } catch (err) {
+    console.error('resetPassword error:', err);
+    return res.status(500).json({ msg: 'Server error' });
   }
 };

@@ -10,6 +10,8 @@ const userSchema = new mongoose.Schema({
   totalSpent: { type: Number, default: 0 },
   lastBooking: { type: Date },
   status: { type: String, enum: ["active", "inactive"], default: "active" },
+  resetPasswordToken: { type: String },
+  resetPasswordExpires: { type: Date },
 }, { timestamps: true });
 
 userSchema.pre("save", async function(next) {
