@@ -9,6 +9,18 @@ import nodemailer from 'nodemailer';
 
 dotenv.config();
 
+// In-memory email send log for diagnostics (ephemeral)
+const EMAIL_SEND_LOG_LIMIT = Number(process.env.EMAIL_SEND_LOG_LIMIT || 100);
+const recentEmailSends = [];
+const pushEmailSendLog = (entry) => {
+  try {
+    recentEmailSends.unshift({ timestamp: new Date().toISOString(), ...entry });
+    if (recentEmailSends.length > EMAIL_SEND_LOG_LIMIT) recentEmailSends.length = EMAIL_SEND_LOG_LIMIT;
+  } catch (e) {
+    console.warn('[auth] pushEmailSendLog failed', e);
+  }
+};
+
 const signToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || "7d"
@@ -154,40 +166,100 @@ export const forgotPassword = async (req, res) => {
     }
 
     html = html.replace(/{{FRONTEND_URL}}/g, process.env.FRONTEND_URL || '')
-               .replace(/{{TOKEN}}/g, token);
+           .replace(/{{TOKEN}}/g, token);
+
+    const resetUrl = `${process.env.FRONTEND_URL || ''}/reset-password?token=${token}`;
+    const text = `Reset your password: ${resetUrl}`;
 
     // Send via SMTP (nodemailer)
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: parseInt(process.env.SMTP_PORT || '587', 10),
-      secure: false,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-    });
+    const sendViaSMTP = async () => {
+      const smtpHost = process.env.SMTP_HOST;
+      const smtpPort = parseInt(process.env.SMTP_PORT || '587', 10);
+      const smtpUser = process.env.SMTP_USER;
+      const smtpPass = process.env.SMTP_PASS;
+      const smtpFrom = process.env.SMTP_FROM || smtpUser || 'no-reply@example.com';
 
-    const from = process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@example.com';
+      if (!smtpHost || !smtpUser || !smtpPass) {
+        console.warn('[forgotPassword] SMTP not fully configured, skipping SMTP send');
+        return { ok: false, reason: 'smtp_not_configured' };
+      }
 
-    // Verify SMTP connection before sending and log detailed outcome
-    try {
-      await transporter.verify();
-      console.log('[forgotPassword] SMTP transporter verified');
-    } catch (verifyErr) {
-      console.error('[forgotPassword] SMTP verify failed:', verifyErr && verifyErr.message ? verifyErr.message : verifyErr);
-    }
-
-    try {
-      const info = await transporter.sendMail({
-        from,
-        to: user.email,
-        subject: 'Password reset request',
-        html,
+      const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: smtpPort,
+        secure: smtpPort === 465, // use TLS for 465
+        auth: {
+          user: smtpUser,
+          pass: smtpPass,
+        },
       });
-      console.log('[forgotPassword] sendMail info:', info);
-    } catch (sendErr) {
-      console.error('[forgotPassword] sendMail error:', sendErr && sendErr.message ? sendErr.message : sendErr);
-      if (sendErr.response) console.error('[forgotPassword] sendMail response:', sendErr.response);
+
+      // Verify SMTP connection before sending and log detailed outcome
+      try {
+        await transporter.verify();
+        console.log('[forgotPassword] SMTP transporter verified');
+      } catch (verifyErr) {
+        console.error('[forgotPassword] SMTP verify failed:', verifyErr && verifyErr.message ? verifyErr.message : verifyErr);
+        // continue and attempt send; sometimes verify fails but send succeeds
+      }
+
+      try {
+        // Log a short preview for diagnostics (not PII except the URL)
+        console.log('[forgotPassword] resetUrl:', resetUrl);
+
+        const info = await transporter.sendMail({
+          from: smtpFrom,
+          to: user.email,
+          subject: 'Password reset request',
+          text,
+          html,
+        });
+        console.log('[forgotPassword] sendMail info:', info);
+        return { ok: true, info };
+      } catch (sendErr) {
+        console.error('[forgotPassword] sendMail error:', sendErr && sendErr.message ? sendErr.message : sendErr);
+        if (sendErr.response) console.error('[forgotPassword] sendMail response:', sendErr.response);
+        return { ok: false, reason: 'send_failed', error: sendErr };
+      }
+    };
+
+    const sendViaMandrill = async () => {
+      const MANDRILL_API_KEY = process.env.MANDRILL_API_KEY || process.env.SMTP_PASS || '';
+      if (!MANDRILL_API_KEY) return { ok: false, reason: 'mandrill_not_configured' };
+
+      try {
+        const mandrillResp = await fetch('https://mandrillapp.com/api/1.0/messages/send.json', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            key: MANDRILL_API_KEY,
+            message: {
+              html,
+              subject: 'Password reset request',
+              from_email: process.env.SMTP_FROM || 'no-reply@example.com',
+              to: [{ email: user.email, type: 'to' }],
+            },
+          }),
+        });
+        const data = await mandrillResp.json().catch(() => null);
+        console.log('[forgotPassword] mandrill response:', data);
+        return { ok: true, data };
+      } catch (err) {
+        console.error('[forgotPassword] mandrill send error:', err && err.message ? err.message : err);
+        return { ok: false, reason: 'mandrill_failed', error: err };
+      }
+    };
+
+    // Attempt SMTP first, then Mandrill as a fallback
+    const smtpResult = await sendViaSMTP();
+    pushEmailSendLog({ email: user.email, method: 'smtp', result: smtpResult });
+    if (!smtpResult.ok) {
+      console.log('[forgotPassword] SMTP send failed or skipped, attempting Mandrill fallback', smtpResult);
+      const mandrillResult = await sendViaMandrill();
+      pushEmailSendLog({ email: user.email, method: 'mandrill', result: mandrillResult });
+      if (!mandrillResult.ok) {
+        console.warn('[forgotPassword] Both SMTP and Mandrill failed/skipped', { smtpResult, mandrillResult });
+      }
     }
 
     return res.json({ msg: 'If an account exists, a reset link has been sent.' });
@@ -217,5 +289,15 @@ export const resetPassword = async (req, res) => {
   } catch (err) {
     console.error('resetPassword error:', err);
     return res.status(500).json({ msg: 'Server error' });
+  }
+};
+
+// Admin helper: return recent email send attempts
+export const getRecentEmailSends = (req, res) => {
+  try {
+    return res.status(200).json({ success: true, data: recentEmailSends });
+  } catch (err) {
+    console.error('[auth] getRecentEmailSends failed', err);
+    return res.status(500).json({ success: false, message: 'Failed to fetch recent email sends' });
   }
 };

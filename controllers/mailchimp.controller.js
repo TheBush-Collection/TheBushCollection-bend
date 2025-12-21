@@ -13,6 +13,20 @@ const MAILCHIMP_SERVER_PREFIX = process.env.MAILCHIMP_SERVER_PREFIX;
 // Get your Audience ID from Mailchimp dashboard -> Audience -> Settings -> Audience name and defaults
 const MAILCHIMP_AUDIENCE_ID = process.env.MAILCHIMP_AUDIENCE_ID || '';
 
+// In-memory recent subscriptions buffer for quick admin verification.
+// This is intentionally lightweight and ephemeral (cleared on server restart).
+const RECENT_SUBS_LIMIT = Number(process.env.MAILCHIMP_RECENT_LIMIT || 50);
+const recentSubscriptions = [];
+
+function pushRecentSubscription(entry) {
+  try {
+    recentSubscriptions.unshift({ timestamp: new Date().toISOString(), ...entry });
+    if (recentSubscriptions.length > RECENT_SUBS_LIMIT) recentSubscriptions.length = RECENT_SUBS_LIMIT;
+  } catch (e) {
+    console.warn('[Mailchimp] Failed to record recent subscription', e);
+  }
+}
+
 /**
  * Subscribe or update a contact in Mailchimp
  */
@@ -39,9 +53,14 @@ export const subscribeContact = async (req, res) => {
     // Encode API key to base64 for Basic Auth
     const auth = Buffer.from(`anystring:${MAILCHIMP_API_KEY}`).toString('base64');
 
+    // Respect server-side double opt-in configuration. When enabled, request Mailchimp
+    // to set the member `status` to 'pending' so Mailchimp sends a confirmation email.
+    const DOUBLE_OPT_IN = (process.env.MAILCHIMP_DOUBLE_OPT_IN || 'false').toLowerCase() === 'true';
+    const requestedStatus = DOUBLE_OPT_IN ? 'pending' : (status || 'subscribed');
+
     const requestBody = {
       email_address: email_address.toLowerCase().trim(),
-      status: status || 'subscribed',
+      status: requestedStatus,
       merge_fields: merge_fields || {},
       tags: tags || [],
     };
@@ -61,10 +80,24 @@ export const subscribeContact = async (req, res) => {
       }
     );
 
-    const responseData = await response.json();
+    let responseData;
+    try {
+      responseData = await response.json();
+    } catch (parseErr) {
+      const text = await response.text().catch(() => '');
+      responseData = { detail: text || 'Non-JSON response from Mailchimp' };
+    }
 
     if (!response.ok) {
       console.error('[Mailchimp] Error:', responseData);
+      // Record failed attempt for admin inspection
+      pushRecentSubscription({
+        email: requestBody.email_address,
+        requestedStatus,
+        ok: false,
+        statusCode: response.status,
+        response: responseData,
+      });
       return res.status(response.status).json({
         success: false,
         message: responseData.detail || 'Failed to subscribe contact',
@@ -73,13 +106,31 @@ export const subscribeContact = async (req, res) => {
     }
 
     console.log('[Mailchimp] Success:', responseData);
+    // Record successful response for admin inspection
+    pushRecentSubscription({
+      email: requestBody.email_address,
+      requestedStatus,
+      ok: true,
+      statusCode: response.status,
+      response: responseData,
+    });
+
     res.status(200).json({
       success: true,
       message: 'Contact subscribed successfully',
       data: responseData,
+      mailchimp_status: responseData.status || requestedStatus,
     });
   } catch (error) {
     console.error('[Mailchimp] Exception:', error);
+    // Record exception for admin inspection
+    pushRecentSubscription({
+      email: req.body?.email_address || null,
+      requestedStatus: req.body?.status || null,
+      ok: false,
+      statusCode: 500,
+      response: { message: error.message || String(error) },
+    });
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -259,6 +310,19 @@ export const mandrillQuery = async (req, res) => {
   } catch (err) {
     console.error('Mandrill query error:', err);
     return res.status(500).json({ success: false, msg: err.message || 'Mandrill query failed' });
+  }
+};
+
+/**
+ * Admin helper: return recent subscription attempts for quick verification
+ * GET /api/mailchimp/recent
+ */
+export const getRecentSubscriptions = (req, res) => {
+  try {
+    return res.status(200).json({ success: true, data: recentSubscriptions });
+  } catch (err) {
+    console.error('[Mailchimp] Failed to return recent subscriptions', err);
+    return res.status(500).json({ success: false, message: 'Failed to fetch recent subscriptions' });
   }
 };
 

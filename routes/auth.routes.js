@@ -1,5 +1,5 @@
 import express from "express";
-import { signup, login, adminLogin, me, forgotPassword, resetPassword } from "../controllers/auth.controller.js";
+import { signup, login, adminLogin, me, forgotPassword, resetPassword, getRecentEmailSends } from "../controllers/auth.controller.js";
 const router = express.Router();
 
 /**
@@ -138,5 +138,8 @@ router.get("/me", me);
 // Password reset routes
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password', resetPassword);
+
+// Admin diagnostics: recent email send attempts
+router.get('/recent-email-sends', getRecentEmailSends);
 
 export default router;

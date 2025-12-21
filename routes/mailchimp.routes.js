@@ -7,9 +7,10 @@ import express from 'express';
 import {
   subscribeContact,
   getContact,
-  unsubscribeContact
+  unsubscribeContact,
+  getRecentSubscriptions,
+  mandrillQuery,
 } from '../controllers/mailchimp.controller.js';
-import { mandrillQuery } from '../controllers/mailchimp.controller.js';
 
 const router = express.Router();
 
@@ -37,5 +38,11 @@ router.post('/unsubscribe', unsubscribeContact);
  * Query: ?id=<mandrill_message_id> OR ?recipient=<email>
  */
 router.get('/mandrill', mandrillQuery);
+
+/**
+ * GET /api/mailchimp/recent
+ * Return recent subscribe attempts for quick admin verification
+ */
+router.get('/recent', getRecentSubscriptions);
 
 export default router;

@@ -7,6 +7,14 @@ import crypto from "crypto";
 import { subscribeContactInternal } from "./mailchimp.controller.js";
 import nodemailer from 'nodemailer';
 import PDFDocument from 'pdfkit';
+import fs from 'fs';
+import path from 'path';
+import { PDFDocument as PDFLib, StandardFonts, rgb } from 'pdf-lib';
+import puppeteer from 'puppeteer';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Helper to create SMTP transporter from env
 const getSmtpTransporter = () => {
@@ -714,17 +722,237 @@ export const generateReceipt = async (req, res) => {
     // If caller requested PDF (query ?format=pdf) or Accept header prefers PDF, generate PDF and return attachment
     const wantsPdf = (req.query && String(req.query.format || '').toLowerCase() === 'pdf') || (req.headers && String(req.headers.accept || '').includes('application/pdf'));
     if (wantsPdf) {
+      // Define filename early so all branches can reference it
+      const filename = `Receipt_${receipt.confirmationNumber || receipt.bookingId}.pdf`;
       try {
-        // Stream PDF directly to response to avoid buffering issues
+        // First: if an HTML template exists, render it with Puppeteer (preferred for styling)
+        const candidateHtmlPaths = [
+          path.resolve(process.cwd(), 'templates', 'receipt.html'),
+          path.resolve(__dirname, '..', 'templates', 'receipt.html'),
+          path.resolve(process.cwd(), '..', 'server', 'templates', 'receipt.html')
+        ];
+        const htmlTemplatePath = candidateHtmlPaths.find(p => fs.existsSync(p));
+        if (htmlTemplatePath) {
+          try {
+            let template = fs.readFileSync(htmlTemplatePath, 'utf8');
+
+            // Attempt to load frontend logo (PNG) from likely public folders so we can embed it into the HTML/pdf.
+            const logoCandidates = [
+              path.resolve(process.cwd(), 'shadcn-ui', 'public', 'images', 'PNG-LOGO (1).png'),
+              path.resolve(process.cwd(), '..', 'shadcn-ui', 'public', 'images', 'PNG-LOGO (1).png'),
+              path.resolve(__dirname, '..', '..', 'shadcn-ui', 'public', 'images', 'PNG-LOGO (1).png')
+            ];
+            let logoDataUrl = '';
+            let logoBytes = null;
+            for (const p of logoCandidates) {
+              try {
+                if (fs.existsSync(p)) {
+                  const buf = fs.readFileSync(p);
+                  logoBytes = buf;
+                  logoDataUrl = `data:image/png;base64,${buf.toString('base64')}`;
+                  console.log('[generateReceipt] using logo from', p);
+                  break;
+                }
+              } catch (e) {
+                // ignore read errors and try next candidate
+                console.warn('[generateReceipt] logo read failed for', p, e && e.message);
+              }
+            }
+
+            // Simple token replacement
+            const fmt = (v) => String(v ?? '');
+            template = template.replace(/{{bookingId}}/g, fmt(receipt.bookingId));
+            template = template.replace(/{{confirmation}}/g, fmt(receipt.confirmationNumber));
+            template = template.replace(/{{customerName}}/g, fmt(receipt.customerName));
+            template = template.replace(/{{customerEmail}}/g, fmt(receipt.customerEmail));
+            template = template.replace(/{{customerPhone}}/g, fmt(receipt.customerPhone));
+            template = template.replace(/{{propertyName}}/g, fmt(receipt.propertyName));
+            template = template.replace(/{{packageName}}/g, fmt(receipt.packageName));
+            template = template.replace(/{{checkIn}}/g, fmt(receipt.checkInDate ? new Date(receipt.checkInDate).toDateString() : ''));
+            template = template.replace(/{{checkOut}}/g, fmt(receipt.checkOutDate ? new Date(receipt.checkOutDate).toDateString() : ''));
+            template = template.replace(/{{nights}}/g, fmt(receipt.nights || 0));
+            template = template.replace(/{{guests}}/g, fmt(receipt.totalGuests ?? (receipt.adults || 0) + (receipt.children || 0)));
+            const costs = receipt.costs || {};
+            const roomRate = costs.room_rate ?? costs.roomRate ?? costs.rate ?? 0;
+            const subtotal = costs.subtotal ?? costs.total ?? 0;
+            const taxes = costs.taxes ?? costs.tax ?? 0;
+            const totalPaid = receipt.amountPaid ?? 0;
+            template = template.replace(/{{roomRate}}/g, `KES ${Number(roomRate).toFixed(2)}`);
+            template = template.replace(/{{subtotal}}/g, `KES ${Number(subtotal).toFixed(2)}`);
+            template = template.replace(/{{taxes}}/g, `KES ${Number(taxes).toFixed(2)}`);
+            template = template.replace(/{{totalPaid}}/g, `KES ${Number(totalPaid).toFixed(2)}`);
+            template = template.replace(/{{paymentMethod}}/g, fmt(receipt.paymentMethod || 'Card'));
+            template = template.replace(/{{bookingDate}}/g, fmt(receipt.createdAt ? new Date(receipt.createdAt).toDateString() : ''));
+
+            // Replace logo token with data URL (if found) so Puppeteer will render it inline. If no logo found, replace with empty string.
+            template = template.replace(/{{LOGO}}/g, logoDataUrl ? logoDataUrl : '');
+
+            // Launch headless browser and render PDF. Configure viewport to match template width for predictable layout.
+            const browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+            try {
+              const page = await browser.newPage();
+              await page.setViewport({ width: 800, height: 1120 });
+              await page.setContent(template, { waitUntil: 'networkidle0' });
+              const pdfBuffer = await page.pdf({ width: '800px', printBackground: true, margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' } });
+              res.setHeader('Content-Type', 'application/pdf');
+              res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+              res.send(pdfBuffer);
+              return;
+            } finally {
+              await browser.close();
+            }
+          } catch (htmlErr) {
+            console.error('HTML template render failed:', htmlErr);
+            // fall through to other handlers
+          }
+        }
+
+        // If a static styled receipt PDF exists in the frontend public folder, try several likely paths and return it
+        const candidateTemplatePaths = [
+          path.resolve(process.cwd(), 'shadcn-ui', 'public', 'Receipt_SB91851081V1PZ.pdf'),
+          path.resolve(process.cwd(), '..', 'shadcn-ui', 'public', 'Receipt_SB91851081V1PZ.pdf'),
+          path.resolve(__dirname, '..', '..', 'shadcn-ui', 'public', 'Receipt_SB91851081V1PZ.pdf'),
+          path.resolve(__dirname, '..', '..', 'public', 'Receipt_SB91851081V1PZ.pdf')
+        ];
+        const templatePath = candidateTemplatePaths.find(p => fs.existsSync(p));
+        if (templatePath) {
+            try {
+            // Load template and overlay booking data using pdf-lib
+            const templateBytes = fs.readFileSync(templatePath);
+            const pdfDoc = await PDFLib.load(templateBytes);
+            const pages = pdfDoc.getPages();
+            const page = pages[0];
+            const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+            const drawText = (text, x, y, size = 10, color = rgb(0, 0, 0)) => {
+              page.drawText(String(text || ''), { x, y, size, font: helvetica, color });
+            };
+
+            // Coordinates are in PDF points (origin bottom-left). Adjust as needed for template.
+            const pageHeight = page.getHeight();
+
+            // Embed logo into the template PDF (if available) and draw header identifiers
+            try {
+              if (logoBytes) {
+                const pngImage = await pdfDoc.embedPng(logoBytes);
+                const desiredWidth = 160; // points
+                const scale = desiredWidth / pngImage.width;
+                const imgDims = pngImage.scale(scale);
+                const imgX = (page.getWidth() - imgDims.width) / 2;
+                // place near footer (centered horizontally, low on page)
+                const footerY = 100; // points from bottom
+                page.drawImage(pngImage, { x: imgX, y: footerY, width: imgDims.width, height: imgDims.height });
+              }
+            } catch (embedErr) {
+              console.warn('Failed to embed logo into PDF template:', embedErr && embedErr.message ? embedErr.message : embedErr);
+            }
+
+            // Header / identifiers (top)
+            drawText(`Booking ID: ${receipt.bookingId}`, 40, pageHeight - 120, 10);
+            drawText(`Confirmation: ${receipt.confirmationNumber}`, 360, pageHeight - 120, 10);
+
+            // Two-column layout for booking + customer details
+            const leftX = 40;
+            const rightX = 320;
+            let y = pageHeight - 140;
+            const lineHeight = 14;
+
+            // Left column: Booking / stay information
+            const stayLines = [];
+            stayLines.push(`Customer: ${receipt.customerName || ''}`);
+            stayLines.push(`Property: ${receipt.propertyName || 'N/A'}`);
+            if (receipt.packageName) stayLines.push(`Package: ${receipt.packageName}`);
+            stayLines.push(`Check-in: ${receipt.checkInDate ? new Date(receipt.checkInDate).toDateString() : ''}`);
+            stayLines.push(`Check-out: ${receipt.checkOutDate ? new Date(receipt.checkOutDate).toDateString() : ''}`);
+            stayLines.push(`Nights: ${receipt.nights || 0}`);
+            stayLines.push(`Guests: ${receipt.totalGuests ?? (receipt.adults || 0) + (receipt.children || 0)}`);
+
+            for (const line of stayLines) {
+              drawText(line, leftX, y, 10);
+              y -= lineHeight;
+            }
+
+            // Right column: Customer contact and booking meta
+            let yRight = pageHeight - 140;
+            drawText(`Email: ${receipt.customerEmail || ''}`, rightX, yRight, 10);
+            yRight -= lineHeight;
+            if (receipt.customerPhone) {
+              drawText(`Phone: ${receipt.customerPhone}`, rightX, yRight, 10);
+              yRight -= lineHeight;
+            }
+            if (receipt.createdAt) {
+              drawText(`Booking Date: ${new Date(receipt.createdAt).toDateString()}`, rightX, yRight, 10);
+              yRight -= lineHeight;
+            }
+
+            // Payment summary area (below columns)
+            const paymentStartY = Math.min(y, yRight) - 18;
+            const paymentX = leftX;
+            let py = paymentStartY;
+
+            const costs = receipt.costs || {};
+            const roomRate = costs.room_rate ?? costs.roomRate ?? costs.room ?? costs.rate ?? 0;
+            const subtotal = costs.subtotal ?? costs.subtotalAmount ?? (costs.items ? costs.items.reduce((s,i)=>s+(i.amount||0),0) : costs.total ?? 0);
+            const taxes = costs.taxes ?? costs.tax ?? 0;
+            const total = costs.total ?? subtotal;
+            const totalPaid = receipt.amountPaid ?? 0;
+
+            drawText('Payment Summary', paymentX, py, 11, rgb(0,0,0));
+            py -= lineHeight;
+            if (roomRate) {
+              drawText(`Room Rate: KES ${Number(roomRate).toFixed(2)}`, paymentX, py, 10);
+              py -= lineHeight;
+            }
+            drawText(`Subtotal: KES ${Number(subtotal || total).toFixed(2)}`, paymentX, py, 10);
+            py -= lineHeight;
+            if (taxes) {
+              drawText(`Taxes & Fees: KES ${Number(taxes).toFixed(2)}`, paymentX, py, 10);
+              py -= lineHeight;
+            }
+            drawText(`Total: KES ${Number(total).toFixed(2)}`, paymentX, py, 10);
+            py -= lineHeight;
+            drawText(`Amount Paid: KES ${Number(totalPaid).toFixed(2)}`, paymentX, py, 10);
+            py -= lineHeight;
+
+            if (receipt.paymentTerm === 'deposit' && receipt.paymentSchedule) {
+              drawText(`Deposit: KES ${Number(receipt.paymentSchedule.depositAmount || 0).toFixed(2)}`, paymentX, py, 10);
+              py -= lineHeight;
+              drawText(`Balance: KES ${Number(receipt.paymentSchedule.balanceAmount || 0).toFixed(2)} (due ${receipt.paymentSchedule.balanceDueDate ? new Date(receipt.paymentSchedule.balanceDueDate).toDateString() : 'N/A'})`, paymentX, py, 10);
+              py -= lineHeight;
+            }
+
+            // Small footer note
+            drawText(`Generated: ${new Date(receipt.generatedAt).toLocaleString()}`, 40, 40, 9, rgb(0.4, 0.4, 0.4));
+
+            const modifiedPdfBytes = await pdfDoc.save();
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.send(Buffer.from(modifiedPdfBytes));
+            return;
+          } catch (streamErr) {
+            console.error('Error editing template PDF:', streamErr);
+            // If editing fails, fall back to streaming original template
+            const fallbackStream = fs.createReadStream(templatePath);
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            fallbackStream.pipe(res);
+            fallbackStream.on('end', () => res.end());
+            fallbackStream.on('error', (err) => {
+              console.error('Fallback streaming template PDF failed:', err);
+              res.status(500).json({ success: false, error: 'Failed to stream template PDF' });
+            });
+            return;
+          }
+        }
+
+        // Fallback: Stream generated PDF directly to response using PDFKit
         const doc = new PDFDocument({ size: 'A4', margin: 50 });
-        const filename = `Receipt_${receipt.confirmationNumber || receipt.bookingId}.pdf`;
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
         // Pipe PDF to response and end request when done
         doc.pipe(res);
 
-        // Header
         doc.fillColor('#0f172a').fontSize(20).text('The Bush Collection', { align: 'center' });
         doc.moveDown(0.5);
         doc.fontSize(14).fillColor('#374151').text('Booking Receipt', { align: 'center' });
@@ -766,7 +994,19 @@ export const generateReceipt = async (req, res) => {
         }
         doc.moveDown(0.5);
 
-        // Footer / thank you
+        // Footer: render logo (if present) then thank-you text
+        try {
+          if (logoBytes) {
+            const logoWidth = 160;
+            const x = (doc.page.width - logoWidth) / 2;
+            // draw image at current cursor position (a bit above footer)
+            doc.image(logoBytes, x, doc.y, { width: logoWidth });
+            doc.moveDown(1);
+          }
+        } catch (imgErr) {
+          console.warn('PDFKit failed to render logo image in footer:', imgErr && imgErr.message ? imgErr.message : imgErr);
+        }
+
         doc.moveDown(1);
         doc.fontSize(10).fillColor('#6b7280').text('Thank you for booking with The Bush Collection.', { align: 'center' });
 

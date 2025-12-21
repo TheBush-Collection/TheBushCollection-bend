@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Receipt</title>
+  <style>
+    /* Reset */
+    * { box-sizing: border-box; }
+    html,body { margin:0; padding:0; }
+    body { font-family: 'Helvetica Neue', Arial, Helvetica, sans-serif; color:#0f172a; background:#fff; }
+    .page { width: 800px; margin: 0 auto; padding: 28px 36px; }
+
+    /* Top success banner */
+    .success { background:#ecfdf5; border:1px solid #bbf7d0; color:#065f46; padding:18px 20px; border-radius:8px; text-align:center; font-weight:600; }
+    .success small { display:block; color:#065f46; font-weight:400; margin-top:6px; }
+
+    /* Header */
+    .header { text-align:center; margin-top:18px; }
+    .brand { font-size:34px; font-weight:700; letter-spacing:0; color:#0f172a; }
+    .tagline { color:#6b7280; margin-top:6px; font-size:13px; }
+    .receipt-badge { display:inline-block; margin-top:12px; padding:8px 14px; border-radius:20px; background:#fff; border:1px solid #e6e9ef; font-weight:600; }
+
+    /* Two-column content */
+    .content { display:flex; gap:24px; margin-top:22px; }
+    .left, .right { flex:1; }
+    .panel { background:#fff; border-radius:6px; padding:12px 14px; }
+    .field { font-size:13px; color:#111827; margin-bottom:8px; }
+    .field .label { display:block; font-size:11px; color:#6b7280; font-weight:700; margin-bottom:4px; }
+
+    /* Payment summary card */
+    .payment { margin-top:12px; border:1px solid #e6e9ef; border-radius:8px; padding:12px; background:#fff; }
+    .payment h3 { margin:0 0 8px 0; font-size:15px; color:#0f172a; }
+    .summary { margin-top:8px; }
+    .summary-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #f1f3f5; font-size:13px; }
+    .summary-row.total { font-weight:700; font-size:15px; }
+    .summary-row .green { color:#16a34a; font-weight:700; }
+
+    /* Booking Information & Customer Details blocks */
+    .info-grid { display:flex; gap:12px; }
+    .info-block { flex:1; }
+    .info-title { font-weight:700; color:#0f172a; margin-bottom:8px; font-size:14px; }
+
+    .important { margin-top:18px; padding:12px; background:#eff6ff; border-left:4px solid #93c5fd; border-radius:6px; font-size:12px; color:#0f172a; }
+
+    .footer { margin-top:18px; text-align:center; color:#6b7280; font-size:12px; }
+
+    /* Utilities */
+    .muted { color:#6b7280; font-size:12px; }
+    .spacer { height:8px; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="success">✓ Payment Successful! <small>Your booking has been confirmed. Here's your receipt:</small></div>
+
+    <div class="header">
+      <div class="brand">The Bush Collection</div>
+      <div class="tagline">Premium Safari Experiences</div>
+      <div class="receipt-badge">Receipt #{{confirmation}}</div>
+    </div>
+
+    <div class="content">
+      <div class="left">
+        <div class="panel">
+          <div class="info-block">
+            <div class="info-title">Booking Information</div>
+            <div class="field"><span class="label">Booking ID</span>{{bookingId}}</div>
+            <div class="field"><span class="label">Property</span>{{propertyName}}</div>
+            <div class="field"><span class="label">Package</span>{{packageName}}</div>
+            <div class="field"><span class="label">Check-in</span>{{checkIn}}</div>
+            <div class="field"><span class="label">Check-out</span>{{checkOut}}</div>
+            <div class="field"><span class="label">Nights</span>{{nights}}</div>
+            <div class="field"><span class="label">Guests</span>{{guests}}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="right">
+        <div class="panel">
+          <div class="info-block">
+            <div class="info-title">Customer Details</div>
+            <div class="field"><span class="label">Name</span>{{customerName}}</div>
+            <div class="field"><span class="label">Email</span>{{customerEmail}}</div>
+            <div class="field"><span class="label">Phone</span>{{customerPhone}}</div>
+            <div class="field"><span class="label">Booking Date</span>{{bookingDate}}</div>
+          </div>
+
+          <div class="payment">
+            <h3>Payment Summary</h3>
+            <div class="summary">
+              <div class="summary-row"><div>Room Rate</div><div>{{roomRate}}</div></div>
+              <div class="summary-row"><div>Subtotal</div><div>{{subtotal}}</div></div>
+              <div class="summary-row"><div>Taxes & Fees</div><div>{{taxes}}</div></div>
+              <div class="summary-row total"><div>Total Paid</div><div class="green">{{totalPaid}}</div></div>
+            </div>
+            <div class="spacer"></div>
+            <div class="muted">Payment Method: {{paymentMethod}}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="important">
+      <div style="font-weight:700; color:#1e40af; font-size:16px;">Important Information</div>
+      <div style="margin-top:8px;">
+        <div style="font-weight:700; color:#b91c1c; margin-bottom:6px">Booking ID: <span style="font-weight:600; color:#b91c1c">{{bookingId}}</span> <small style="font-weight:400; color:#b91c1c">(Keep this for your records)</small></div>
+        <ul style="margin:8px 0 0 18px; color:#b91c1c;">
+          <li>Please arrive at the property by 3:00 PM on your check-in date</li>
+          <li>Check-out time is 11:00 AM</li>
+          <li>Keep this receipt for your records</li>
+          <li>For any changes or cancellations, contact us at least 48 hours in advance</li>
+          <li>Emergency contact: +254 116 072 343</li>
+        </ul>
+      </div>
+    </div>
+    
+    <div style="text-align:center; margin-top:18px;">
+      <img src="{{LOGO}}" alt="The Bush Collection logo" style="max-width:220px; display:block; margin:0 auto;" />
+    </div>
+
+    <div class="footer">Thank you for choosing The Bush Collection. For support contact support@thebushcollection.africa or call +254 116 072 343</div>
+  </div>
+</body>
+</html>

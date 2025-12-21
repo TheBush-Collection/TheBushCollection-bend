@@ -18,9 +18,11 @@ async function subscribeToMailchimp(contact) {
   if (!mailchimpBase) return { success: false, reason: 'no_server_prefix' };
   try {
     const url = `${mailchimpBase}/lists/${MAILCHIMP_LIST_ID}/members`;
+    const DOUBLE_OPT_IN = (process.env.MAILCHIMP_DOUBLE_OPT_IN || 'false').toLowerCase() === 'true';
+    const reqStatus = DOUBLE_OPT_IN ? 'pending' : 'subscribed';
     const data = {
       email_address: contact.email,
-      status: 'subscribed',
+      status: reqStatus,
       merge_fields: {
         FNAME: contact.fullName ? contact.fullName.split(' ')[0] : '',
         LNAME: contact.fullName ? contact.fullName.split(' ').slice(1).join(' ') : '',
@@ -53,7 +55,7 @@ async function subscribeToMailchimp(contact) {
           auth: { username: 'anystring', password: MAILCHIMP_API_KEY },
           headers: { 'Content-Type': 'application/json' }
         });
-        return { success: true, data: resp.data };
+        return { success: true, data: resp.data, mailchimp_status: resp.data.status || reqStatus };
       } catch (upErr) {
         return { success: false, error: upErr.message };
       }
