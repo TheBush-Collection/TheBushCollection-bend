@@ -1,0 +1,1523 @@
+﻿import Booking from "../models/booking.model.js";
+import User from "../models/user.model.js";
+import Property from "../models/property.model.js";
+import Package from "../models/package.model.js";
+import { v4 as uuidv4 } from "uuid";
+import crypto from "crypto";
+import { subscribeContactInternal } from "./mailchimp.controller.js";
+import nodemailer from 'nodemailer';
+import PDFDocument from 'pdfkit';
+import fs from 'fs';
+import path from 'path';
+import { PDFDocument as PDFLib, StandardFonts, rgb } from 'pdf-lib';
+import puppeteer from 'puppeteer';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Helper to create SMTP transporter from env
+const getSmtpTransporter = () => {
+  const smtpHost = process.env.SMTP_HOST;
+  const smtpPort = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587;
+  const smtpUser = process.env.SMTP_USER;
+  const smtpPass = process.env.SMTP_PASS;
+
+  if (!smtpHost) return null;
+
+  return nodemailer.createTransport({
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpPort === 465,
+    auth: smtpUser && smtpPass ? { user: smtpUser, pass: smtpPass } : undefined,
+  });
+};
+
+// Generate booking ID
+const generateBookingId = () => {
+  return 'BK' + Date.now().toString().slice(-8) + crypto.randomBytes(3).toString('hex').toUpperCase();
+};
+
+// Generate confirmation number
+const generateConfirmationNumber = () => {
+  return 'SB' + Date.now().toString().slice(-8) + Math.random().toString(36).substr(2, 4).toUpperCase();
+};
+
+// Helper to send booking notification via Mailchimp service
+const sendBookingNotification = async (booking, type = 'booking_created') => {
+  if (!booking || !booking.customerEmail) return;
+
+  const email = booking.customerEmail || booking.customerEmail;
+  const name = (booking.customerName || '').split(' ');
+  const merge_fields = {
+    FNAME: name[0] || '',
+    LNAME: name.slice(1).join(' ') || '',
+    BOOKING_ID: booking.bookingId || booking._id || booking.id || '',
+    CONFIRMATION: booking.confirmationNumber || booking.confirmation_number || '',
+    STATUS: booking.status || '',
+    CHECKIN: booking.checkInDate ? new Date(booking.checkInDate).toISOString().split('T')[0] : (booking.checkIn ? booking.checkIn : ''),
+    CHECKOUT: booking.checkOutDate ? new Date(booking.checkOutDate).toISOString().split('T')[0] : (booking.checkOut ? booking.checkOut : ''),
+    AMOUNT: booking.costs?.total ?? booking.total ?? 0,
+    PROPERTY: booking.property?.name || booking.property_name || ''
+  };
+
+  const tag = `booking_${type}`; // e.g., booking_booking_created, booking_cancelled
+  // 1) Subscribe/update Mailchimp and add tag (existing behavior)
+  try {
+    await subscribeContactInternal({
+      email_address: email,
+      merge_fields,
+      tags: [tag]
+    });
+    console.log(`Mailchimp: notification tag '${tag}' added for ${email}`);
+  } catch (err) {
+    console.error('Mailchimp subscribeContactInternal error:', err);
+  }
+
+  // 2) Send transactional email with PDF receipt attached (if SMTP configured)
+  try {
+    const transporter = getSmtpTransporter();
+    if (!transporter) {
+      console.warn('SMTP not configured - skipping transactional email');
+      return;
+    }
+
+    // Verify SMTP connection/configuration (logs errors if any)
+    try {
+      await transporter.verify();
+      console.log('SMTP transporter verified');
+    } catch (verifyErr) {
+      console.error('SMTP verify failed:', verifyErr);
+      // continue - sendMail will likely fail but we keep error handling below
+    }
+
+    // Prepare email HTML
+    const subject = `Your booking receipt - ${merge_fields.CONFIRMATION || merge_fields.BOOKING_ID}`;
+    const html = `<p>Dear ${merge_fields.FNAME || 'Guest'},</p>
+      <p>Thank you for your booking. Please find your receipt attached.</p>
+      <ul>
+        <li><strong>Booking ID:</strong> ${merge_fields.BOOKING_ID}</li>
+        <li><strong>Confirmation:</strong> ${merge_fields.CONFIRMATION}</li>
+        <li><strong>Property:</strong> ${merge_fields.PROPERTY}</li>
+        <li><strong>Check-in:</strong> ${merge_fields.CHECKIN}</li>
+        <li><strong>Check-out:</strong> ${merge_fields.CHECKOUT}</li>
+        <li><strong>Amount:</strong> ${merge_fields.AMOUNT}</li>
+      </ul>
+      <p>Kind regards,<br/>The Bush Collection</p>`;
+
+    // Generate simple PDF receipt in memory using PDFKit
+    const pdfBuffer = await new Promise((resolve, reject) => {
+      try {
+        const doc = new PDFDocument({ size: 'A4', margin: 50 });
+        const chunks = [];
+        doc.on('data', (chunk) => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+
+        // Header
+        doc.fontSize(20).text('The Bush Collection', { align: 'center' });
+        doc.moveDown();
+        doc.fontSize(14).text(`Booking Receipt`, { align: 'center' });
+        doc.moveDown();
+
+        // Booking details
+        doc.fontSize(12).text(`Booking ID: ${merge_fields.BOOKING_ID}`);
+        doc.text(`Confirmation: ${merge_fields.CONFIRMATION}`);
+        doc.text(`Customer: ${booking.customerName || ''}`);
+        doc.text(`Email: ${booking.customerEmail || ''}`);
+        doc.moveDown();
+        doc.text(`Property: ${merge_fields.PROPERTY}`);
+        doc.text(`Check-in: ${merge_fields.CHECKIN}`);
+        doc.text(`Check-out: ${merge_fields.CHECKOUT}`);
+        doc.moveDown();
+        doc.text(`Nights: ${booking.nights || ''}`);
+        doc.text(`Guests: ${booking.totalGuests || ''}`);
+        doc.moveDown();
+        doc.fontSize(12).text(`Total: ${merge_fields.AMOUNT}`);
+        doc.moveDown();
+
+        doc.fontSize(10).text('Thank you for booking with The Bush Collection.');
+
+        doc.end();
+      } catch (err) {
+        reject(err);
+      }
+    });
+
+    const mailOptions = {
+      from: process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@thebushcollection.africa',
+      to: email,
+      subject,
+      html,
+      attachments: [
+        {
+          filename: `Receipt_${merge_fields.CONFIRMATION || merge_fields.BOOKING_ID}.pdf`,
+          content: pdfBuffer,
+          contentType: 'application/pdf'
+        }
+      ]
+    };
+
+    // Ensure we have a valid sender and log mail options for debugging
+    const resolvedFrom = mailOptions.from || process.env.FROM_EMAIL || process.env.SMTP_USER || 'no-reply@thebushcollection.africa';
+    console.log('Sending transactional email - from:', resolvedFrom, 'to:', mailOptions.to);
+    // Explicitly set SMTP envelope to avoid provider showing an empty MAIL FROM
+    const sendOpts = { ...mailOptions, envelope: { from: resolvedFrom, to: Array.isArray(mailOptions.to) ? mailOptions.to : [mailOptions.to] } };
+    console.log('Transactional mail send options (envelope will be used):', { envelope: sendOpts.envelope });
+
+    const info = await transporter.sendMail(sendOpts);
+    console.log('Transactional receipt email sent:', info && info.messageId);
+    // Log provider response for delivery debugging
+    if (info && info.response) console.log('SMTP response:', info.response);
+    if (info && info.envelope) console.log('SMTP envelope:', info.envelope);
+    if (info && info.accepted) console.log('SMTP accepted:', info.accepted);
+    if (info && info.rejected) console.log('SMTP rejected:', info.rejected);
+  } catch (err) {
+    console.error('Error sending transactional email (booking notification):', err);
+  }
+};
+
+// Create booking (comprehensive - for frontend checkout flow)
+export const createBooking = async (req, res) => {
+  try {
+    const {
+      bookingType, // 'property' or 'package'
+      propertyId,
+      packageId,
+      rooms, // array of { roomId, quantity, guests, pricePerNightPerPerson }
+      checkInDate,
+      checkOutDate,
+      nights,
+      totalGuests,
+      adults,
+      children,
+      specialRequests,
+      // Customer info
+      customerName,
+      customerEmail,
+      customerPhone,
+      customerCountryCode,
+      // Airport transfer
+      airportTransfer,
+      // Amenities
+      amenities, // array of { amenityId, amenityName, quantity, pricePerUnit, totalPrice }
+      // Costs
+      costs,
+      // Payment
+      paymentTerm,
+      paymentSchedule,
+      amountPaid
+    } = req.body;
+
+    // Validation
+    if (!bookingType || !customerName || !customerEmail || !checkInDate || !checkOutDate) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: bookingType, customerName, customerEmail, checkInDate, checkOutDate' 
+      });
+    }
+
+    if (bookingType === 'property' && (!propertyId || !rooms || rooms.length === 0)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Property booking requires propertyId and rooms array' 
+      });
+    }
+
+    if (bookingType === 'package' && !packageId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Package booking requires packageId' 
+      });
+    }
+
+    // Create booking document
+    const bookingId = generateBookingId();
+    const confirmationNumber = generateConfirmationNumber();
+
+    const bookingData = {
+      bookingId,
+      confirmationNumber,
+      bookingType,
+      property: bookingType === 'property' ? propertyId : undefined,
+      package: bookingType === 'package' ? packageId : undefined,
+      customerName,
+      customerEmail,
+      customerPhone,
+      customerCountryCode,
+      checkInDate: new Date(checkInDate),
+      checkOutDate: new Date(checkOutDate),
+      nights: Number(nights) || 0,
+      totalGuests: Number(totalGuests),
+      adults: Number(adults) || 0,
+      children: Number(children) || 0,
+      specialRequests,
+      rooms: rooms || [],
+      airportTransfer: airportTransfer || { needed: false },
+      amenities: amenities || [],
+      costs: costs || { basePrice: 0, amenitiesTotal: 0, subtotal: 0, serviceFee: 0, taxes: 0, total: 0 },
+      paymentTerm: paymentTerm || 'deposit',
+      paymentSchedule: paymentSchedule || { depositAmount: 0, balanceAmount: 0, depositDueDate: new Date(), balanceDueDate: new Date() },
+      amountPaid: Number(amountPaid) || 0,
+      status: 'pending'
+    };
+
+    const booking = await Booking.create(bookingData);
+
+      // Fire-and-forget: subscribe/contact update in Mailchimp and trigger automation by adding tags
+      (async () => {
+        try {
+          await sendBookingNotification(booking, 'booking_created');
+        } catch (err) {
+          console.error('Mailchimp notify error (createBooking):', err);
+        }
+      })();
+
+    return res.status(201).json({
+      success: true,
+      booking,
+      message: 'Booking created successfully'
+    });
+  } catch (err) {
+    console.error('Booking creation error:', err);
+    return res.status(500).json({ 
+      success: false, 
+      error: err.message || 'Failed to create booking' 
+    });
+  }
+};
+
+// Admin: list bookings with filters and actions
+export const listBookings = async (req, res) => {
+  try {
+    const { page = 1, limit = 30, status, search } = req.query;
+    const q = {};
+    if (status) q.status = status;
+    if (search) q.bookingId = { $regex: search, $options: "i" };
+    const bookings = await Booking.find(q)
+      .populate("property", "name")
+      .populate("package", "name")
+      .skip((page-1)*limit)
+      .limit(Number(limit))
+      .sort({ createdAt: -1 });
+    const total = await Booking.countDocuments(q);
+    res.json({ data: bookings, total });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+// List bookings for the authenticated user
+export const listUserBookings = async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ msg: 'Not authenticated' });
+    const email = req.user.email;
+    const bookings = await Booking.find({ customerEmail: email })
+      .populate('property', 'name')
+      .populate('package', 'name')
+      .sort({ createdAt: -1 });
+    res.json({ data: bookings });
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+export const getBooking = async (req, res) => {
+  try {
+    const b = await Booking.findById(req.params.id)
+      .populate("property", "name location")
+      .populate("package", "name duration");
+    if (!b) return res.status(404).json({ msg: "Not found" });
+    res.json(b);
+  } catch (err) {
+    res.status(500).json({ msg: err.message });
+  }
+};
+
+// Get booking by bookingId (for customers)
+export const getBookingByRef = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const b = await Booking.findOne({ bookingId })
+      .populate("property", "name location address")
+      .populate("package", "name duration description");
+    
+    if (!b) {
+      return res.status(404).json({ 
+        success: false,
+        msg: "Booking not found" 
+      });
+    }
+
+    // Allow access if user is owner or admin
+    if (req.user && req.user.role !== 'admin' && b.customerEmail !== req.user.email) {
+      return res.status(403).json({ 
+        success: false,
+        msg: "Not authorized to view this booking" 
+      });
+    }
+
+    res.json({
+      success: true,
+      booking: b
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      msg: err.message 
+    });
+  }
+};
+
+// Admin actions - Update booking status
+export const setDepositPaid = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    
+    if (!booking) {
+      return res.status(404).json({ 
+        success: false,
+        msg: "Booking not found" 
+      });
+    }
+
+    // Validate status transition
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ 
+        success: false,
+        msg: "Cannot update a cancelled booking" 
+      });
+    }
+
+    // Determine deposit amount: prefer explicit amount from caller, else use stored paymentSchedule or fallback to 30% of total
+    const callerAmount = req.body?.amountPaid != null ? Number(req.body.amountPaid) : null;
+    const callerPaymentDetails = req.body?.paymentDetails || null;
+    const depositAmount = callerAmount != null
+      ? callerAmount
+      : (booking.paymentSchedule && booking.paymentSchedule.depositAmount)
+        ? Number(booking.paymentSchedule.depositAmount)
+        : (booking.costs && booking.costs.total ? Math.round((booking.costs.total * 0.3 + Number.EPSILON) * 100) / 100 : 0);
+
+    const update = {
+      status: "deposit_paid",
+      amountPaid: depositAmount,
+      paymentTerm: booking.paymentTerm || 'deposit'
+    };
+    if (callerPaymentDetails) update.paymentDetails = callerPaymentDetails;
+
+    const updatedBooking = await Booking.findByIdAndUpdate(
+      req.params.id,
+      update,
+      { new: true }
+    );
+
+    res.json({
+      success: true,
+      message: "Booking status updated to deposit_paid",
+      booking: updatedBooking
+    });
+    (async () => {
+      try {
+        await sendBookingNotification(updatedBooking, 'deposit_paid');
+      } catch (err) {
+        console.error('Mailchimp notify error (deposit_paid):', err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      msg: err.message 
+    });
+  }
+};
+
+export const setConfirmed = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    
+    if (!booking) {
+      return res.status(404).json({ 
+        success: false,
+        msg: "Booking not found" 
+      });
+    }
+
+    // Validate status transition
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ 
+        success: false,
+        msg: "Cannot update a cancelled booking" 
+      });
+    }
+
+    const updatedBooking = await Booking.findByIdAndUpdate(
+      req.params.id, 
+      { status: "confirmed" }, 
+      { new: true }
+    );
+
+    res.json({
+      success: true,
+      message: "Booking status updated to confirmed",
+      booking: updatedBooking
+    });
+    (async () => {
+      try {
+        await sendBookingNotification(updatedBooking, 'confirmed');
+      } catch (err) {
+        console.error('Mailchimp notify error (confirmed):', err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      msg: err.message 
+    });
+  }
+};
+
+export const setFullyPaid = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    
+    if (!booking) {
+      return res.status(404).json({ 
+        success: false,
+        msg: "Booking not found" 
+      });
+    }
+
+    // Validate status transition
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ 
+        success: false,
+        msg: "Cannot update a cancelled booking" 
+      });
+    }
+
+    // Determine paid amount: prefer explicit amount from caller, else use stored costs.total
+    const callerAmount = req.body?.amountPaid != null ? Number(req.body.amountPaid) : null;
+    const callerPaymentDetails = req.body?.paymentDetails || null;
+    const paidAmount = callerAmount != null
+      ? callerAmount
+      : (booking.costs && booking.costs.total ? Number(booking.costs.total) : 0);
+
+    const update = {
+      status: "fully_paid",
+      amountPaid: paidAmount,
+      paymentTerm: 'full'
+    };
+    if (callerPaymentDetails) update.paymentDetails = callerPaymentDetails;
+
+    const updatedBooking = await Booking.findByIdAndUpdate(
+      req.params.id,
+      update,
+      { new: true }
+    );
+
+    res.json({
+      success: true,
+      message: "Booking status updated to fully_paid",
+      booking: updatedBooking
+    });
+    (async () => {
+      try {
+        await sendBookingNotification(updatedBooking, 'fully_paid');
+      } catch (err) {
+        console.error('Mailchimp notify error (fully_paid):', err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      msg: err.message 
+    });
+  }
+};
+
+// Admin: mark booking as completed (e.g., guest checked in)
+export const setCompleted = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) {
+      return res.status(404).json({ success: false, msg: "Booking not found" });
+    }
+
+    // Do not complete a cancelled booking
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ success: false, msg: "Cannot complete a cancelled booking" });
+    }
+
+    const updatedBooking = await Booking.findByIdAndUpdate(
+      req.params.id,
+      { status: 'completed', checkedInAt: new Date() },
+      { new: true }
+    );
+
+    res.json({ success: true, message: 'Booking marked as completed', booking: updatedBooking });
+
+    (async () => {
+      try {
+        await sendBookingNotification(updatedBooking, 'checked_in');
+      } catch (err) {
+        console.error('Mailchimp notify error (checked_in):', err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ success: false, msg: err.message });
+  }
+};
+
+export const reopenBooking = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    
+    if (!booking) {
+      return res.status(404).json({ 
+        success: false,
+        msg: "Booking not found" 
+      });
+    }
+
+    const updatedBooking = await Booking.findByIdAndUpdate(
+      req.params.id, 
+      { status: "pending" }, 
+      { new: true }
+    );
+
+    res.json({
+      success: true,
+      message: "Booking reopened (status set to pending)",
+      booking: updatedBooking
+    });
+    (async () => {
+      try {
+        await sendBookingNotification(updatedBooking, 'reopened');
+      } catch (err) {
+        console.error('Mailchimp notify error (reopened):', err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      msg: err.message 
+    });
+  }
+};
+
+export const cancelBooking = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    
+    if (!booking) {
+      return res.status(404).json({ 
+        success: false,
+        msg: "Booking not found" 
+      });
+    }
+
+    // Check if user is authorized (admin or booking owner)
+    if (req.user && req.user.role !== 'admin' && booking.customerEmail !== req.user.email) {
+      return res.status(403).json({ 
+        success: false,
+        msg: "Not authorized to cancel this booking" 
+      });
+    }
+
+    // Only allow cancellation of non-cancelled bookings
+    if (booking.status === 'cancelled') {
+      return res.status(400).json({ 
+        success: false,
+        msg: "Booking is already cancelled" 
+      });
+    }
+
+    // Store old status for audit trail
+    const previousStatus = booking.status;
+
+    // Accept optional reason from request body
+    const cancellationReason = req.body?.reason || req.body?.cancellationReason || null;
+
+    const updatedBooking = await Booking.findByIdAndUpdate(
+      req.params.id,
+      { 
+        status: "cancelled",
+        cancelledAt: new Date(),
+        cancelledBy: req.user?.role || 'unknown',
+        cancellationReason: cancellationReason
+      },
+      { new: true }
+    );
+
+    res.json({
+      success: true,
+      message: "Booking cancelled successfully",
+      previousStatus,
+      booking: updatedBooking
+    });
+    (async () => {
+      try {
+        await sendBookingNotification(updatedBooking, 'cancelled');
+      } catch (err) {
+        console.error('Mailchimp notify error (cancelled):', err);
+      }
+    })();
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      msg: err.message 
+    });
+  }
+};
+
+// Generate receipt for booking
+export const generateReceipt = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const booking = await Booking.findOne({ bookingId })
+      .populate("property", "name location address")
+      .populate("package", "name duration description")
+      .populate("rooms.roomId", "name");
+    
+    if (!booking) {
+      return res.status(404).json({ 
+        success: false,
+        msg: "Booking not found" 
+      });
+    }
+
+    // Allow access if user is owner or admin
+    if (req.user && req.user.role !== 'admin' && booking.customerEmail !== req.user.email) {
+      return res.status(403).json({ 
+        success: false,
+        msg: "Not authorized to download this receipt" 
+      });
+    }
+
+    // Format receipt data
+    const receipt = {
+      bookingId: booking.bookingId,
+      confirmationNumber: booking.confirmationNumber,
+      customerName: booking.customerName,
+      customerEmail: booking.customerEmail,
+      customerPhone: booking.customerPhone,
+      customerCountryCode: booking.customerCountryCode || '',
+      bookingType: booking.bookingType,
+      propertyName: booking.property?.name || 'N/A',
+      packageName: booking.package?.name || 'N/A',
+      checkInDate: booking.checkInDate,
+      checkOutDate: booking.checkOutDate,
+      nights: booking.nights,
+      totalGuests: booking.totalGuests,
+      adults: booking.adults,
+      children: booking.children,
+      specialRequests: booking.specialRequests || '',
+      airportTransfer: booking.airportTransfer || {},
+      rooms: (booking.rooms || []).map(r => ({
+        ...(r.toObject ? r.toObject() : r),
+        roomName: r.roomName || (r.roomId && r.roomId.name) || 'N/A'
+      })),
+      amenities: booking.amenities || [],
+      costs: booking.costs,
+      paymentTerm: booking.paymentTerm,
+      paymentSchedule: booking.paymentSchedule,
+      amountPaid: booking.amountPaid,
+      status: booking.status,
+      createdAt: booking.createdAt,
+      generatedAt: new Date()
+    };
+    // If caller requested PDF (query ?format=pdf) or Accept header prefers PDF, generate PDF and return attachment
+    const wantsPdf = (req.query && String(req.query.format || '').toLowerCase() === 'pdf') || (req.headers && String(req.headers.accept || '').includes('application/pdf'));
+    if (wantsPdf) {
+      // Define filename early so all branches can reference it
+      const filename = `Receipt_${receipt.confirmationNumber || receipt.bookingId}.pdf`;
+      try {
+        // First: if an HTML template exists, render it with Puppeteer (preferred for styling)
+        const candidateHtmlPaths = [
+          path.resolve(process.cwd(), 'templates', 'receipt.html'),
+          path.resolve(__dirname, '..', 'templates', 'receipt.html'),
+          path.resolve(process.cwd(), '..', 'server', 'templates', 'receipt.html')
+        ];
+        const htmlTemplatePath = candidateHtmlPaths.find(p => fs.existsSync(p));
+        if (htmlTemplatePath) {
+          try {
+            let template = fs.readFileSync(htmlTemplatePath, 'utf8');
+
+            // Attempt to load frontend logo (PNG) from likely public folders so we can embed it into the HTML/pdf.
+            const logoCandidates = [
+              path.resolve(process.cwd(), 'shadcn-ui', 'public', 'images', 'PNG-LOGO (1).png'),
+              path.resolve(process.cwd(), '..', 'shadcn-ui', 'public', 'images', 'PNG-LOGO (1).png'),
+              path.resolve(__dirname, '..', '..', 'shadcn-ui', 'public', 'images', 'PNG-LOGO (1).png')
+            ];
+            let logoDataUrl = '';
+            let logoBytes = null;
+            for (const p of logoCandidates) {
+              try {
+                if (fs.existsSync(p)) {
+                  const buf = fs.readFileSync(p);
+                  logoBytes = buf;
+                  logoDataUrl = `data:image/png;base64,${buf.toString('base64')}`;
+                  console.log('[generateReceipt] using logo from', p);
+                  break;
+                }
+              } catch (e) {
+                // ignore read errors and try next candidate
+                console.warn('[generateReceipt] logo read failed for', p, e && e.message);
+              }
+            }
+
+            // Simple token replacement
+            const fmt = (v) => String(v ?? '');
+            template = template.replace(/{{bookingId}}/g, fmt(receipt.bookingId));
+            template = template.replace(/{{confirmation}}/g, fmt(receipt.confirmationNumber));
+            template = template.replace(/{{customerName}}/g, fmt(receipt.customerName));
+            template = template.replace(/{{customerEmail}}/g, fmt(receipt.customerEmail));
+            template = template.replace(/{{customerPhone}}/g, fmt(receipt.customerPhone));
+            template = template.replace(/{{customerCountryCode}}/g, fmt(receipt.customerCountryCode));
+            template = template.replace(/{{propertyName}}/g, fmt(receipt.propertyName));
+            template = template.replace(/{{packageName}}/g, fmt(receipt.packageName));
+            template = template.replace(/{{checkIn}}/g, fmt(receipt.checkInDate ? new Date(receipt.checkInDate).toDateString() : ''));
+            template = template.replace(/{{checkOut}}/g, fmt(receipt.checkOutDate ? new Date(receipt.checkOutDate).toDateString() : ''));
+            template = template.replace(/{{nights}}/g, fmt(receipt.nights || 0));
+            template = template.replace(/{{guests}}/g, fmt(receipt.totalGuests ?? (receipt.adults || 0) + (receipt.children || 0)));
+            template = template.replace(/{{adults}}/g, fmt(receipt.adults || 0));
+            template = template.replace(/{{children}}/g, fmt(receipt.children || 0));
+            template = template.replace(/{{bookingDate}}/g, fmt(receipt.createdAt ? new Date(receipt.createdAt).toDateString() : ''));
+            template = template.replace(/{{paymentMethod}}/g, fmt(receipt.paymentMethod || 'Card'));
+
+            // Booking type badge
+            const isProperty = receipt.bookingType === 'property';
+            template = template.replace(/{{bookingTypeBadgeClass}}/g, isProperty ? 'badge-property' : 'badge-package');
+            template = template.replace(/{{bookingTypeLabel}}/g, isProperty ? 'Property Booking' : 'Package Booking');
+
+            // Status label
+            const statusLabels = { pending: 'Pending', deposit_paid: 'Deposit Paid', confirmed: 'Confirmed', fully_paid: 'Fully Paid', cancelled: 'Cancelled' };
+            template = template.replace(/{{statusLabel}}/g, statusLabels[receipt.status] || receipt.status || 'N/A');
+
+            // Payment term label
+            template = template.replace(/{{paymentTermLabel}}/g, receipt.paymentTerm === 'deposit' ? 'Deposit (30% now)' : 'Full Payment');
+
+            // Costs
+            const costs = receipt.costs || {};
+            const basePrice = costs.basePrice ?? 0;
+            const amenitiesTotal = costs.amenitiesTotal ?? 0;
+            const subtotal = costs.subtotal ?? costs.total ?? 0;
+            const serviceFee = costs.serviceFee ?? 0;
+            const taxes = costs.taxes ?? costs.tax ?? 0;
+            const grandTotal = costs.total ?? 0;
+            const totalPaid = receipt.amountPaid ?? 0;
+            template = template.replace(/{{basePrice}}/g, `USD ${Number(basePrice).toFixed(2)}`);
+            template = template.replace(/{{amenitiesTotal}}/g, `USD ${Number(amenitiesTotal).toFixed(2)}`);
+            template = template.replace(/{{subtotal}}/g, `USD ${Number(subtotal).toFixed(2)}`);
+            template = template.replace(/{{serviceFee}}/g, `USD ${Number(serviceFee).toFixed(2)}`);
+            template = template.replace(/{{taxes}}/g, `USD ${Number(taxes).toFixed(2)}`);
+            template = template.replace(/{{grandTotal}}/g, `USD ${Number(grandTotal).toFixed(2)}`);
+            template = template.replace(/{{totalPaid}}/g, `USD ${Number(totalPaid).toFixed(2)}`);
+
+            // Rooms section (dynamic HTML)
+            let roomsHtml = '';
+            if (Array.isArray(receipt.rooms) && receipt.rooms.length > 0) {
+              let roomRows = receipt.rooms.map(r =>
+                `<tr><td>${fmt(r.roomName || 'Room')}</td><td class="num">${fmt(r.quantity || 1)}</td><td class="num">${fmt(r.guests || '-')}</td><td class="num">USD ${Number(r.pricePerNightPerPerson || 0).toFixed(2)}</td><td class="num">USD ${Number(r.subtotal || 0).toFixed(2)}</td></tr>`
+              ).join('');
+              roomsHtml = `<div class="section-title">Room Details</div>
+                <table class="rooms-table">
+                  <thead><tr><th>Room</th><th class="num">Qty</th><th class="num">Guests</th><th class="num">Rate/Night/Person</th><th class="num">Subtotal</th></tr></thead>
+                  <tbody>${roomRows}</tbody>
+                </table>`;
+            }
+            template = template.replace(/{{roomsSection}}/g, roomsHtml);
+
+            // Amenities section (dynamic HTML)
+            let amenitiesHtml = '';
+            if (Array.isArray(receipt.amenities) && receipt.amenities.length > 0) {
+              let amenityRows = receipt.amenities.map(a =>
+                `<tr><td>${fmt(a.amenityName || 'Amenity')}</td><td class="num">${fmt(a.quantity || 1)}</td><td class="num">USD ${Number(a.pricePerUnit || 0).toFixed(2)}</td><td class="num">USD ${Number(a.totalPrice || 0).toFixed(2)}</td></tr>`
+              ).join('');
+              amenitiesHtml = `<div class="section-title">Selected Amenities</div>
+                <table class="amenities-table">
+                  <thead><tr><th>Amenity</th><th class="num">Qty</th><th class="num">Unit Price</th><th class="num">Total</th></tr></thead>
+                  <tbody>${amenityRows}</tbody>
+                </table>`;
+            }
+            template = template.replace(/{{amenitiesSection}}/g, amenitiesHtml);
+
+            // Airport transfer section
+            let transferHtml = '';
+            const transfer = receipt.airportTransfer || {};
+            if (transfer.needed) {
+              transferHtml = `<div class="transfer-card">
+                <h4>âœˆ Airport Transfer</h4>
+                ${transfer.arrivalDate ? `<div class="field"><span class="label">Arrival</span>${new Date(transfer.arrivalDate).toDateString()}${transfer.arrivalTime ? ' at ' + transfer.arrivalTime : ''}${transfer.arrivalFlightNumber ? ' Flight ' + transfer.arrivalFlightNumber : ''}</div>` : ''}
+                ${transfer.departureDate ? `<div class="field"><span class="label">Departure</span>${new Date(transfer.departureDate).toDateString()}${transfer.departureTime ? ' at ' + transfer.departureTime : ''}${transfer.departureFlightNumber ? ' Flight ' + transfer.departureFlightNumber : ''}</div>` : ''}
+              </div>`;
+            }
+            template = template.replace(/{{transferSection}}/g, transferHtml);
+
+            // Special requests section
+            let specialHtml = '';
+            if (receipt.specialRequests && receipt.specialRequests.trim()) {
+              specialHtml = `<div class="special-requests">
+                <h4>ðŸ“ Special Requests</h4>
+                <p>${fmt(receipt.specialRequests)}</p>
+              </div>`;
+            }
+            template = template.replace(/{{specialRequestsSection}}/g, specialHtml);
+
+            // Deposit schedule section (shown only for deposit payment term)
+            let depositHtml = '';
+            if (receipt.paymentTerm === 'deposit' && receipt.paymentSchedule) {
+              const ps = receipt.paymentSchedule;
+              depositHtml = `
+                <div class="summary-row"><div>Deposit Amount (30%)</div><div>USD ${Number(ps.depositAmount || 0).toFixed(2)}</div></div>
+                <div class="summary-row"><div>Balance Due (70%)</div><div>USD ${Number(ps.balanceAmount || 0).toFixed(2)}</div></div>
+                ${ps.balanceDueDate ? `<div class="summary-row"><div>Balance Due Date</div><div>${new Date(ps.balanceDueDate).toDateString()}</div></div>` : ''}`;
+            }
+            template = template.replace(/{{depositScheduleSection}}/g, depositHtml);
+
+            // Replace logo token with data URL (if found) so Puppeteer will render it inline. If no logo found, replace with empty string.
+            template = template.replace(/{{LOGO}}/g, logoDataUrl ? logoDataUrl : '');
+
+            // Launch headless browser and render PDF. Configure viewport to match template width for predictable layout.
+            const browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+            try {
+              const page = await browser.newPage();
+              await page.setViewport({ width: 800, height: 1120 });
+              await page.setContent(template, { waitUntil: 'networkidle0' });
+              const pdfBuffer = await page.pdf({ width: '800px', printBackground: true, margin: { top: '12mm', bottom: '12mm', left: '12mm', right: '12mm' } });
+              res.setHeader('Content-Type', 'application/pdf');
+              res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+              res.send(pdfBuffer);
+              return;
+            } finally {
+              await browser.close();
+            }
+          } catch (htmlErr) {
+            console.error('HTML template render failed:', htmlErr);
+            // fall through to other handlers
+          }
+        }
+
+        // If a static styled receipt PDF exists in the frontend public folder, try several likely paths and return it
+        const candidateTemplatePaths = [
+          path.resolve(process.cwd(), 'shadcn-ui', 'public', 'Receipt_SB91851081V1PZ.pdf'),
+          path.resolve(process.cwd(), '..', 'shadcn-ui', 'public', 'Receipt_SB91851081V1PZ.pdf'),
+          path.resolve(__dirname, '..', '..', 'shadcn-ui', 'public', 'Receipt_SB91851081V1PZ.pdf'),
+          path.resolve(__dirname, '..', '..', 'public', 'Receipt_SB91851081V1PZ.pdf')
+        ];
+        const templatePath = candidateTemplatePaths.find(p => fs.existsSync(p));
+        if (templatePath) {
+            try {
+            // Load template and overlay booking data using pdf-lib
+            const templateBytes = fs.readFileSync(templatePath);
+            const pdfDoc = await PDFLib.load(templateBytes);
+            const pages = pdfDoc.getPages();
+            const page = pages[0];
+            const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+            const drawText = (text, x, y, size = 10, color = rgb(0, 0, 0)) => {
+              page.drawText(String(text || ''), { x, y, size, font: helvetica, color });
+            };
+
+            // Coordinates are in PDF points (origin bottom-left). Adjust as needed for template.
+            const pageHeight = page.getHeight();
+
+            // Embed logo into the template PDF (if available) and draw header identifiers
+            try {
+              if (logoBytes) {
+                const pngImage = await pdfDoc.embedPng(logoBytes);
+                const desiredWidth = 160; // points
+                const scale = desiredWidth / pngImage.width;
+                const imgDims = pngImage.scale(scale);
+                const imgX = (page.getWidth() - imgDims.width) / 2;
+                // place near footer (centered horizontally, low on page)
+                const footerY = 100; // points from bottom
+                page.drawImage(pngImage, { x: imgX, y: footerY, width: imgDims.width, height: imgDims.height });
+              }
+            } catch (embedErr) {
+              console.warn('Failed to embed logo into PDF template:', embedErr && embedErr.message ? embedErr.message : embedErr);
+            }
+
+            // Header / identifiers (top)
+            drawText(`Booking ID: ${receipt.bookingId}`, 40, pageHeight - 120, 10);
+            drawText(`Confirmation: ${receipt.confirmationNumber}`, 360, pageHeight - 120, 10);
+
+            // Two-column layout for booking + customer details
+            const leftX = 40;
+            const rightX = 320;
+            let y = pageHeight - 140;
+            const lineHeight = 14;
+
+            // Left column: Booking / stay information
+            const stayLines = [];
+            stayLines.push(`Customer: ${receipt.customerName || ''}`);
+            stayLines.push(`Property: ${receipt.propertyName || 'N/A'}`);
+            if (receipt.packageName) stayLines.push(`Package: ${receipt.packageName}`);
+            stayLines.push(`Check-in: ${receipt.checkInDate ? new Date(receipt.checkInDate).toDateString() : ''}`);
+            stayLines.push(`Check-out: ${receipt.checkOutDate ? new Date(receipt.checkOutDate).toDateString() : ''}`);
+            stayLines.push(`Nights: ${receipt.nights || 0}`);
+            stayLines.push(`Guests: ${receipt.totalGuests ?? (receipt.adults || 0) + (receipt.children || 0)}`);
+
+            for (const line of stayLines) {
+              drawText(line, leftX, y, 10);
+              y -= lineHeight;
+            }
+
+            // Right column: Customer contact and booking meta
+            let yRight = pageHeight - 140;
+            drawText(`Email: ${receipt.customerEmail || ''}`, rightX, yRight, 10);
+            yRight -= lineHeight;
+            if (receipt.customerPhone) {
+              drawText(`Phone: ${receipt.customerPhone}`, rightX, yRight, 10);
+              yRight -= lineHeight;
+            }
+            if (receipt.createdAt) {
+              drawText(`Booking Date: ${new Date(receipt.createdAt).toDateString()}`, rightX, yRight, 10);
+              yRight -= lineHeight;
+            }
+
+            // Payment summary area (below columns)
+            const paymentStartY = Math.min(y, yRight) - 18;
+            const paymentX = leftX;
+            let py = paymentStartY;
+
+            const costs = receipt.costs || {};
+            const roomRate = costs.room_rate ?? costs.roomRate ?? costs.room ?? costs.rate ?? 0;
+            const subtotal = costs.subtotal ?? costs.subtotalAmount ?? (costs.items ? costs.items.reduce((s,i)=>s+(i.amount||0),0) : costs.total ?? 0);
+            const taxes = costs.taxes ?? costs.tax ?? 0;
+            const total = costs.total ?? subtotal;
+            const totalPaid = receipt.amountPaid ?? 0;
+
+            drawText('Payment Summary', paymentX, py, 11, rgb(0,0,0));
+            py -= lineHeight;
+            if (roomRate) {
+              drawText(`Room Rate: USD ${Number(roomRate).toFixed(2)}`, paymentX, py, 10);
+              py -= lineHeight;
+            }
+            drawText(`Subtotal: USD ${Number(subtotal || total).toFixed(2)}`, paymentX, py, 10);
+            py -= lineHeight;
+            if (taxes) {
+              drawText(`Taxes & Fees: USD ${Number(taxes).toFixed(2)}`, paymentX, py, 10);
+              py -= lineHeight;
+            }
+            drawText(`Total: USD ${Number(total).toFixed(2)}`, paymentX, py, 10);
+            py -= lineHeight;
+            drawText(`Amount Paid: USD ${Number(totalPaid).toFixed(2)}`, paymentX, py, 10);
+            py -= lineHeight;
+
+            if (receipt.paymentTerm === 'deposit' && receipt.paymentSchedule) {
+              drawText(`Deposit: USD ${Number(receipt.paymentSchedule.depositAmount || 0).toFixed(2)}`, paymentX, py, 10);
+              py -= lineHeight;
+              drawText(`Balance: USD ${Number(receipt.paymentSchedule.balanceAmount || 0).toFixed(2)} (due ${receipt.paymentSchedule.balanceDueDate ? new Date(receipt.paymentSchedule.balanceDueDate).toDateString() : 'N/A'})`, paymentX, py, 10);
+              py -= lineHeight;
+            }
+
+            // Small footer note
+            drawText(`Generated: ${new Date(receipt.generatedAt).toLocaleString()}`, 40, 40, 9, rgb(0.4, 0.4, 0.4));
+
+            const modifiedPdfBytes = await pdfDoc.save();
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.send(Buffer.from(modifiedPdfBytes));
+            return;
+          } catch (streamErr) {
+            console.error('Error editing template PDF:', streamErr);
+            // If editing fails, fall back to streaming original template
+            const fallbackStream = fs.createReadStream(templatePath);
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            fallbackStream.pipe(res);
+            fallbackStream.on('end', () => res.end());
+            fallbackStream.on('error', (err) => {
+              console.error('Fallback streaming template PDF failed:', err);
+              res.status(500).json({ success: false, error: 'Failed to stream template PDF' });
+            });
+            return;
+          }
+        }
+
+        // Fallback: Stream generated PDF directly to response using PDFKit
+        const doc = new PDFDocument({ size: 'A4', margin: 50 });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+        // Pipe PDF to response and end request when done
+        doc.pipe(res);
+
+        doc.fillColor('#0f172a').fontSize(20).text('The Bush Collection', { align: 'center' });
+        doc.moveDown(0.5);
+        doc.fontSize(14).fillColor('#374151').text('Booking Receipt', { align: 'center' });
+        doc.moveDown(1);
+
+        // Booking / customer block
+        const left = 50;
+        const rightStart = 320;
+        doc.fontSize(10).fillColor('#111827');
+        doc.text(`Booking ID: ${receipt.bookingId}`, left, doc.y);
+        doc.text(`Confirmation: ${receipt.confirmationNumber}`, rightStart, doc.y - 12);
+        doc.moveDown(0.5);
+        doc.text(`Customer: ${receipt.customerName}`, left);
+        doc.text(`Email: ${receipt.customerEmail}`, rightStart);
+        doc.moveDown(0.5);
+
+        // Property / stay info
+        doc.fontSize(11).fillColor('#0f172a').text('Stay Information', { underline: true });
+        doc.moveDown(0.2);
+        doc.fontSize(10).fillColor('#111827');
+        doc.text(`Property: ${receipt.propertyName}`);
+        if (receipt.packageName) doc.text(`Package: ${receipt.packageName}`);
+        doc.text(`Check-in: ${receipt.checkInDate ? new Date(receipt.checkInDate).toDateString() : ''}`);
+        doc.text(`Check-out: ${receipt.checkOutDate ? new Date(receipt.checkOutDate).toDateString() : ''}`);
+        doc.text(`Nights: ${receipt.nights || 0}`);
+        doc.text(`Guests: ${receipt.totalGuests || ''}`);
+        doc.moveDown(0.5);
+
+        // Costs
+        doc.fontSize(11).fillColor('#0f172a').text('Payment Summary', { underline: true });
+        doc.moveDown(0.2);
+        doc.fontSize(10).fillColor('#111827');
+        const total = receipt.costs?.total ?? 0;
+        doc.text(`Total: USD ${Number(total).toFixed(2)}`);
+        doc.text(`Amount Paid: USD ${Number(receipt.amountPaid || 0).toFixed(2)}`);
+        if (receipt.paymentTerm === 'deposit' && receipt.paymentSchedule) {
+          doc.text(`Deposit: USD ${Number(receipt.paymentSchedule.depositAmount || 0).toFixed(2)}`);
+          doc.text(`Balance: USD ${Number(receipt.paymentSchedule.balanceAmount || 0).toFixed(2)} (due ${receipt.paymentSchedule.balanceDueDate ? new Date(receipt.paymentSchedule.balanceDueDate).toDateString() : 'N/A'})`);
+        }
+        doc.moveDown(0.5);
+
+        // Footer: render logo (if present) then thank-you text
+        try {
+          if (logoBytes) {
+            const logoWidth = 160;
+            const x = (doc.page.width - logoWidth) / 2;
+            // draw image at current cursor position (a bit above footer)
+            doc.image(logoBytes, x, doc.y, { width: logoWidth });
+            doc.moveDown(1);
+          }
+        } catch (imgErr) {
+          console.warn('PDFKit failed to render logo image in footer:', imgErr && imgErr.message ? imgErr.message : imgErr);
+        }
+
+        doc.moveDown(1);
+        doc.fontSize(10).fillColor('#6b7280').text('Thank you for booking with The Bush Collection.', { align: 'center' });
+
+        // Finalize PDF and let pipe handle the response
+        doc.end();
+        return; // response will be handled by the stream
+      } catch (pdfErr) {
+        console.error('Failed to generate PDF receipt (stream):', pdfErr);
+        return res.status(500).json({ success: false, error: 'Failed to generate PDF receipt', details: String(pdfErr) });
+      }
+    }
+
+    res.json({
+      success: true,
+      receipt
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      msg: err.message 
+    });
+  }
+};
+
+// Manual notify endpoint to resend or trigger a specific notification for a booking
+export const notifyBooking = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { type = 'booking_created' } = req.body;
+    const booking = await Booking.findById(id)
+      .populate('property', 'name')
+      .populate('package', 'name');
+
+    if (!booking) return res.status(404).json({ success: false, msg: 'Booking not found' });
+
+    await sendBookingNotification(booking, type);
+
+    res.json({ success: true, message: `Notification '${type}' sent` });
+  } catch (err) {
+    console.error('notifyBooking error:', err);
+    res.status(500).json({ success: false, msg: err.message });
+  }
+};
+
+// Send booking receipt email (by booking _id or bookingId)
+// Uses the styled HTML receipt template and attaches a PDF via Mailchimp Transactional (Mandrill) SMTP
+export const sendReceiptEmail = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { email } = req.body || {};
+
+    // Build query: only try _id if the value looks like a valid MongoDB ObjectId
+    const isObjectId = /^[0-9a-fA-F]{24}$/.test(id);
+    const query = isObjectId
+      ? { $or: [{ _id: id }, { bookingId: id }] }
+      : { bookingId: id };
+
+    const booking = await Booking.findOne(query)
+      .populate('property', 'name location address')
+      .populate('package', 'name duration description')
+      .populate('rooms.roomId', 'name');
+
+    if (!booking) return res.status(404).json({ success: false, msg: 'Booking not found' });
+
+    // If caller provided an email, ensure it matches booking.customerEmail for simple auth
+    if (email && booking.customerEmail && email.toLowerCase().trim() !== booking.customerEmail.toLowerCase().trim()) {
+      return res.status(403).json({ success: false, msg: 'Email does not match booking recipient' });
+    }
+
+    const recipient = booking.customerEmail;
+    if (!recipient) return res.status(400).json({ success: false, msg: 'Booking has no customer email' });
+
+    // ---- Format receipt data (same as generateReceipt) ----
+    const receipt = {
+      bookingId: booking.bookingId,
+      confirmationNumber: booking.confirmationNumber,
+      customerName: booking.customerName,
+      customerEmail: booking.customerEmail,
+      customerPhone: booking.customerPhone,
+      customerCountryCode: booking.customerCountryCode || '',
+      bookingType: booking.bookingType,
+      propertyName: booking.property?.name || 'N/A',
+      packageName: booking.package?.name || 'N/A',
+      checkInDate: booking.checkInDate,
+      checkOutDate: booking.checkOutDate,
+      nights: booking.nights,
+      totalGuests: booking.totalGuests,
+      adults: booking.adults,
+      children: booking.children,
+      specialRequests: booking.specialRequests || '',
+      airportTransfer: booking.airportTransfer || {},
+      rooms: (booking.rooms || []).map(r => ({
+        ...(r.toObject ? r.toObject() : r),
+        roomName: r.roomName || (r.roomId && r.roomId.name) || 'N/A'
+      })),
+      amenities: booking.amenities || [],
+      costs: booking.costs,
+      amountPaid: booking.amountPaid,
+      paymentTerm: booking.paymentTerm,
+      paymentSchedule: booking.paymentSchedule,
+      status: booking.status,
+      createdAt: booking.createdAt,
+    };
+
+    const costs = receipt.costs || {};
+    const basePrice = costs.basePrice ?? 0;
+    const amenitiesTotal = costs.amenitiesTotal ?? 0;
+    const subtotal = costs.subtotal ?? costs.total ?? 0;
+    const serviceFee = costs.serviceFee ?? 0;
+    const taxes = costs.taxes ?? costs.tax ?? 0;
+    const grandTotal = costs.total ?? 0;
+    const totalPaid = receipt.amountPaid ?? 0;
+
+    // ---- Build styled HTML email body from receipt template ----
+    let receiptHtml = '';
+    const candidateHtmlPaths = [
+      path.resolve(process.cwd(), 'templates', 'receipt.html'),
+      path.resolve(__dirname, '..', 'templates', 'receipt.html'),
+      path.resolve(process.cwd(), '..', 'server', 'templates', 'receipt.html')
+    ];
+    const htmlTemplatePath = candidateHtmlPaths.find(p => fs.existsSync(p));
+
+    if (htmlTemplatePath) {
+      const fmt = (v) => String(v ?? '');
+      let template = fs.readFileSync(htmlTemplatePath, 'utf8');
+      template = template.replace(/{{bookingId}}/g, fmt(receipt.bookingId));
+      template = template.replace(/{{confirmation}}/g, fmt(receipt.confirmationNumber));
+      template = template.replace(/{{customerName}}/g, fmt(receipt.customerName));
+      template = template.replace(/{{customerEmail}}/g, fmt(receipt.customerEmail));
+      template = template.replace(/{{customerPhone}}/g, fmt(receipt.customerPhone));
+      template = template.replace(/{{customerCountryCode}}/g, fmt(receipt.customerCountryCode));
+      template = template.replace(/{{propertyName}}/g, fmt(receipt.propertyName));
+      template = template.replace(/{{packageName}}/g, fmt(receipt.packageName));
+      template = template.replace(/{{checkIn}}/g, fmt(receipt.checkInDate ? new Date(receipt.checkInDate).toDateString() : ''));
+      template = template.replace(/{{checkOut}}/g, fmt(receipt.checkOutDate ? new Date(receipt.checkOutDate).toDateString() : ''));
+      template = template.replace(/{{nights}}/g, fmt(receipt.nights || 0));
+      template = template.replace(/{{guests}}/g, fmt(receipt.totalGuests ?? (receipt.adults || 0) + (receipt.children || 0)));
+      template = template.replace(/{{adults}}/g, fmt(receipt.adults || 0));
+      template = template.replace(/{{children}}/g, fmt(receipt.children || 0));
+      template = template.replace(/{{bookingDate}}/g, fmt(receipt.createdAt ? new Date(receipt.createdAt).toDateString() : ''));
+      template = template.replace(/{{paymentMethod}}/g, fmt(receipt.paymentMethod || 'Card'));
+
+      // Booking type badge
+      const isProperty = receipt.bookingType === 'property';
+      template = template.replace(/{{bookingTypeBadgeClass}}/g, isProperty ? 'badge-property' : 'badge-package');
+      template = template.replace(/{{bookingTypeLabel}}/g, isProperty ? 'Property Booking' : 'Package Booking');
+
+      // Status label
+      const statusLabels = { pending: 'Pending', deposit_paid: 'Deposit Paid', confirmed: 'Confirmed', fully_paid: 'Fully Paid', cancelled: 'Cancelled' };
+      template = template.replace(/{{statusLabel}}/g, statusLabels[receipt.status] || receipt.status || 'N/A');
+
+      // Payment term label
+      template = template.replace(/{{paymentTermLabel}}/g, receipt.paymentTerm === 'deposit' ? 'Deposit (30% now)' : 'Full Payment');
+
+      // Costs
+      template = template.replace(/{{basePrice}}/g, `USD ${Number(basePrice).toFixed(2)}`);
+      template = template.replace(/{{amenitiesTotal}}/g, `USD ${Number(amenitiesTotal).toFixed(2)}`);
+      template = template.replace(/{{subtotal}}/g, `USD ${Number(subtotal).toFixed(2)}`);
+      template = template.replace(/{{serviceFee}}/g, `USD ${Number(serviceFee).toFixed(2)}`);
+      template = template.replace(/{{taxes}}/g, `USD ${Number(taxes).toFixed(2)}`);
+      template = template.replace(/{{grandTotal}}/g, `USD ${Number(grandTotal).toFixed(2)}`);
+      template = template.replace(/{{totalPaid}}/g, `USD ${Number(totalPaid).toFixed(2)}`);
+
+      // Rooms section
+      let roomsHtml = '';
+      if (Array.isArray(receipt.rooms) && receipt.rooms.length > 0) {
+        let roomRows = receipt.rooms.map(r =>
+          `<tr><td>${fmt(r.roomName || 'Room')}</td><td class="num">${fmt(r.quantity || 1)}</td><td class="num">${fmt(r.guests || '-')}</td><td class="num">USD ${Number(r.pricePerNightPerPerson || 0).toFixed(2)}</td><td class="num">USD ${Number(r.subtotal || 0).toFixed(2)}</td></tr>`
+        ).join('');
+        roomsHtml = `<div class="section-title">Room Details</div>
+          <table class="rooms-table"><thead><tr><th>Room</th><th class="num">Qty</th><th class="num">Guests</th><th class="num">Rate/Night/Person</th><th class="num">Subtotal</th></tr></thead>
+          <tbody>${roomRows}</tbody></table>`;
+      }
+      template = template.replace(/{{roomsSection}}/g, roomsHtml);
+
+      // Amenities section
+      let amenitiesHtml = '';
+      if (Array.isArray(receipt.amenities) && receipt.amenities.length > 0) {
+        let amenityRows = receipt.amenities.map(a =>
+          `<tr><td>${fmt(a.amenityName || 'Amenity')}</td><td class="num">${fmt(a.quantity || 1)}</td><td class="num">USD ${Number(a.pricePerUnit || 0).toFixed(2)}</td><td class="num">USD ${Number(a.totalPrice || 0).toFixed(2)}</td></tr>`
+        ).join('');
+        amenitiesHtml = `<div class="section-title">Selected Amenities</div>
+          <table class="amenities-table"><thead><tr><th>Amenity</th><th class="num">Qty</th><th class="num">Unit Price</th><th class="num">Total</th></tr></thead>
+          <tbody>${amenityRows}</tbody></table>`;
+      }
+      template = template.replace(/{{amenitiesSection}}/g, amenitiesHtml);
+
+      // Airport transfer section
+      let transferHtml = '';
+      const transfer = receipt.airportTransfer || {};
+      if (transfer.needed) {
+        transferHtml = `<div class="transfer-card"><h4>âœˆ Airport Transfer</h4>
+          ${transfer.arrivalDate ? `<div class="field"><span class="label">Arrival</span>${new Date(transfer.arrivalDate).toDateString()}${transfer.arrivalTime ? ' at ' + transfer.arrivalTime : ''}${transfer.arrivalFlightNumber ? '  Flight ' + transfer.arrivalFlightNumber : ''}</div>` : ''}
+          ${transfer.departureDate ? `<div class="field"><span class="label">Departure</span>${new Date(transfer.departureDate).toDateString()}${transfer.departureTime ? ' at ' + transfer.departureTime : ''}${transfer.departureFlightNumber ? '  Flight ' + transfer.departureFlightNumber : ''}</div>` : ''}
+        </div>`;
+      }
+      template = template.replace(/{{transferSection}}/g, transferHtml);
+
+      // Special requests section
+      let specialHtml = '';
+      if (receipt.specialRequests && receipt.specialRequests.trim()) {
+        specialHtml = `<div class="special-requests"><h4>ðŸ“ Special Requests</h4><p>${fmt(receipt.specialRequests)}</p></div>`;
+      }
+      template = template.replace(/{{specialRequestsSection}}/g, specialHtml);
+
+      // Deposit schedule section
+      let depositHtml = '';
+      if (receipt.paymentTerm === 'deposit' && receipt.paymentSchedule) {
+        const ps = receipt.paymentSchedule;
+        depositHtml = `
+          <div class="summary-row"><div>Deposit Amount (30%)</div><div>USD ${Number(ps.depositAmount || 0).toFixed(2)}</div></div>
+          <div class="summary-row"><div>Balance Due (70%)</div><div>USD ${Number(ps.balanceAmount || 0).toFixed(2)}</div></div>
+          ${ps.balanceDueDate ? `<div class="summary-row"><div>Balance Due Date</div><div>${new Date(ps.balanceDueDate).toDateString()}</div></div>` : ''}`;
+      }
+      template = template.replace(/{{depositScheduleSection}}/g, depositHtml);
+
+      template = template.replace(/{{LOGO}}/g, '');
+      receiptHtml = template;
+    } else {
+      // Fallback: simple HTML receipt with all details
+      const roomsList = (receipt.rooms || []).map(r => `<li>${r.roomName || 'Room'} Ã— ${r.quantity || 1}  ${r.guests || '-'} guests USD ${Number(r.subtotal || 0).toFixed(2)}</li>`).join('');
+      const amenitiesList = (receipt.amenities || []).map(a => `<li>${a.amenityName || 'Amenity'} Ã— ${a.quantity || 1} USD ${Number(a.totalPrice || 0).toFixed(2)}</li>`).join('');
+      receiptHtml = `
+        <h2>Booking Receipt - ${receipt.confirmationNumber || receipt.bookingId}</h2>
+        <p><strong>Property:</strong> ${receipt.propertyName}</p>
+        <p><strong>Package:</strong> ${receipt.packageName}</p>
+        <p><strong>Check-in:</strong> ${receipt.checkInDate ? new Date(receipt.checkInDate).toDateString() : ''}</p>
+        <p><strong>Check-out:</strong> ${receipt.checkOutDate ? new Date(receipt.checkOutDate).toDateString() : ''}</p>
+        <p><strong>Nights:</strong> ${receipt.nights || 0}</p>
+        <p><strong>Guests:</strong> ${receipt.totalGuests || ''} (${receipt.adults || 0} adults, ${receipt.children || 0} children)</p>
+        ${roomsList ? `<h3>Rooms</h3><ul>${roomsList}</ul>` : ''}
+        ${amenitiesList ? `<h3>Amenities</h3><ul>${amenitiesList}</ul>` : ''}
+        ${receipt.specialRequests ? `<p><strong>Special Requests:</strong> ${receipt.specialRequests}</p>` : ''}
+        <h3>Payment</h3>
+        <p><strong>Total:</strong> USD ${Number(grandTotal).toFixed(2)}</p>
+        <p><strong>Amount Paid:</strong> USD ${Number(totalPaid).toFixed(2)}</p>
+        <p>Thank you for booking with The Bush Collection.</p>
+      `;
+    }
+
+    // ---- Generate PDF attachment using PDFKit ----
+    const pdfBuffer = await new Promise((resolve, reject) => {
+      try {
+        const doc = new PDFDocument({ size: 'A4', margin: 50 });
+        const chunks = [];
+        doc.on('data', (chunk) => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+
+        doc.fontSize(20).text('The Bush Collection', { align: 'center' });
+        doc.moveDown(0.3);
+        doc.fontSize(14).text('Booking Receipt', { align: 'center' });
+        doc.moveDown(0.3);
+        doc.fontSize(10).fillColor('#6b7280').text(`Receipt #${receipt.confirmationNumber || receipt.bookingId}`, { align: 'center' });
+        doc.moveDown(1);
+
+        // Booking info
+        doc.fillColor('#0f172a').fontSize(12).text('Booking Information', { underline: true });
+        doc.moveDown(0.3);
+        doc.fontSize(10).fillColor('#111827');
+        doc.text(`Booking ID: ${receipt.bookingId}`);
+        doc.text(`Type: ${receipt.bookingType === 'property' ? 'Property Booking' : 'Package Booking'}`);
+        doc.text(`Property: ${receipt.propertyName}`);
+        doc.text(`Package: ${receipt.packageName}`);
+        doc.text(`Check-in: ${receipt.checkInDate ? new Date(receipt.checkInDate).toDateString() : ''}`);
+        doc.text(`Check-out: ${receipt.checkOutDate ? new Date(receipt.checkOutDate).toDateString() : ''}`);
+        doc.text(`Nights: ${receipt.nights || 0}`);
+        doc.text(`Guests: ${receipt.totalGuests ?? (receipt.adults || 0) + (receipt.children || 0)} (${receipt.adults || 0} adults, ${receipt.children || 0} children)`);
+        doc.moveDown(0.5);
+
+        // Customer info
+        doc.fillColor('#0f172a').fontSize(12).text('Customer Details', { underline: true });
+        doc.moveDown(0.3);
+        doc.fontSize(10).fillColor('#111827');
+        doc.text(`Name: ${receipt.customerName || ''}`);
+        doc.text(`Email: ${receipt.customerEmail || ''}`);
+        doc.text(`Phone: ${receipt.customerCountryCode ? receipt.customerCountryCode + ' ' : ''}${receipt.customerPhone || ''}`);
+        doc.moveDown(0.5);
+
+        // Rooms
+        if (Array.isArray(receipt.rooms) && receipt.rooms.length > 0) {
+          doc.fillColor('#0f172a').fontSize(12).text('Room Details', { underline: true });
+          doc.moveDown(0.3);
+          doc.fontSize(10).fillColor('#111827');
+          receipt.rooms.forEach(r => {
+            doc.text(`â€¢ ${r.roomName || 'Room'} Qty: ${r.quantity || 1}, Guests: ${r.guests || '-'}, Rate: USD ${Number(r.pricePerNightPerPerson || 0).toFixed(2)}/night/person, Subtotal: USD ${Number(r.subtotal || 0).toFixed(2)}`);
+          });
+          doc.moveDown(0.5);
+        }
+
+        // Amenities
+        if (Array.isArray(receipt.amenities) && receipt.amenities.length > 0) {
+          doc.fillColor('#0f172a').fontSize(12).text('Selected Amenities', { underline: true });
+          doc.moveDown(0.3);
+          doc.fontSize(10).fillColor('#111827');
+          receipt.amenities.forEach(a => {
+            doc.text(`â€¢ ${a.amenityName || 'Amenity'} Qty: ${a.quantity || 1}, Unit: USD ${Number(a.pricePerUnit || 0).toFixed(2)}, Total: USD ${Number(a.totalPrice || 0).toFixed(2)}`);
+          });
+          doc.moveDown(0.5);
+        }
+
+        // Airport transfer
+        const transfer = receipt.airportTransfer || {};
+        if (transfer.needed) {
+          doc.fillColor('#0f172a').fontSize(12).text('Airport Transfer', { underline: true });
+          doc.moveDown(0.3);
+          doc.fontSize(10).fillColor('#111827');
+          if (transfer.arrivalDate) doc.text(`Arrival: ${new Date(transfer.arrivalDate).toDateString()}${transfer.arrivalTime ? ' at ' + transfer.arrivalTime : ''}${transfer.arrivalFlightNumber ? ' Flight ' + transfer.arrivalFlightNumber : ''}`);
+          if (transfer.departureDate) doc.text(`Departure: ${new Date(transfer.departureDate).toDateString()}${transfer.departureTime ? ' at ' + transfer.departureTime : ''}${transfer.departureFlightNumber ? ' Flight ' + transfer.departureFlightNumber : ''}`);
+          doc.moveDown(0.5);
+        }
+
+        // Special requests
+        if (receipt.specialRequests && receipt.specialRequests.trim()) {
+          doc.fillColor('#0f172a').fontSize(12).text('Special Requests', { underline: true });
+          doc.moveDown(0.3);
+          doc.fontSize(10).fillColor('#111827').text(receipt.specialRequests);
+          doc.moveDown(0.5);
+        }
+
+        // Payment summary
+        doc.fillColor('#0f172a').fontSize(12).text('Payment Summary', { underline: true });
+        doc.moveDown(0.3);
+        doc.fontSize(10).fillColor('#111827');
+        doc.text(`Base Price: USD ${Number(basePrice).toFixed(2)}`);
+        doc.text(`Amenities Total: USD ${Number(amenitiesTotal).toFixed(2)}`);
+        doc.text(`Subtotal: USD ${Number(subtotal).toFixed(2)}`);
+        doc.text(`Service Fee: USD ${Number(serviceFee).toFixed(2)}`);
+        doc.text(`Taxes & Fees: USD ${Number(taxes).toFixed(2)}`);
+        doc.fontSize(12).fillColor('#0f172a').text(`Grand Total: USD ${Number(grandTotal).toFixed(2)}`);
+        doc.fontSize(12).fillColor('#16a34a').text(`Amount Paid: USD ${Number(totalPaid).toFixed(2)}`);
+        if (receipt.paymentTerm === 'deposit' && receipt.paymentSchedule) {
+          const ps = receipt.paymentSchedule;
+          doc.fontSize(10).fillColor('#111827');
+          doc.text(`Deposit (30%): USD ${Number(ps.depositAmount || 0).toFixed(2)}`);
+          doc.text(`Balance (70%): USD ${Number(ps.balanceAmount || 0).toFixed(2)}${ps.balanceDueDate ? ' Due: ' + new Date(ps.balanceDueDate).toDateString() : ''}`);
+        }
+        doc.moveDown(1);
+
+        doc.fontSize(10).fillColor('#6b7280').text('Thank you for booking with The Bush Collection.', { align: 'center' });
+        doc.end();
+      } catch (err) {
+        reject(err);
+      }
+    });
+
+    // ---- Also tag the contact in Mailchimp for tracking ----
+    try {
+      const name = (receipt.customerName || '').split(' ');
+      await subscribeContactInternal({
+        email_address: recipient,
+        merge_fields: {
+          FNAME: name[0] || '',
+          LNAME: name.slice(1).join(' ') || '',
+          BOOKING_ID: receipt.bookingId || '',
+        },
+        tags: ['receipt_emailed'],
+      });
+      console.log(`Mailchimp: tagged '${recipient}' with 'receipt_emailed'`);
+    } catch (mcErr) {
+      // Non-blocking; log and continue
+      console.warn('Mailchimp tag failed for receipt email:', mcErr.message || mcErr);
+    }
+
+    // ---- Send via SMTP (Mandrill transactional) ----
+    const smtpHost = process.env.SMTP_HOST;
+    const smtpPort = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587;
+    const smtpUser = process.env.SMTP_USER;
+    const smtpPass = process.env.SMTP_PASS;
+    const fromEmail = process.env.FROM_EMAIL || process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@thebushcollection.africa';
+
+    if (!smtpHost) {
+      console.error('SMTP not configured â€“ SMTP_HOST is missing. Current env keys:', Object.keys(process.env).filter(k => k.startsWith('SMTP')));
+      return res.status(500).json({ success: false, msg: 'SMTP not configured on server' });
+    }
+
+    const transporter = nodemailer.createTransport({
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpPort === 465,
+      auth: smtpUser && smtpPass ? { user: smtpUser, pass: smtpPass } : undefined,
+    });
+
+    try {
+      await transporter.verify();
+      console.log('SMTP transporter verified for receipt email');
+    } catch (verifyErr) {
+      console.error('SMTP verify failed (receipt email):', verifyErr);
+      return res.status(500).json({ success: false, msg: 'SMTP verify failed' });
+    }
+
+    const mailOptions = {
+      from: fromEmail,
+      to: recipient,
+      subject: `Your Booking Receipt - ${receipt.confirmationNumber || receipt.bookingId}`,
+      html: receiptHtml,
+      text: `Booking receipt for ${receipt.confirmationNumber || receipt.bookingId}. Property: ${receipt.propertyName}. Check-in: ${receipt.checkInDate ? new Date(receipt.checkInDate).toDateString() : ''}. Check-out: ${receipt.checkOutDate ? new Date(receipt.checkOutDate).toDateString() : ''}. Total Paid: USD ${Number(totalPaid).toFixed(2)}.`,
+      attachments: [
+        {
+          filename: `Receipt_${receipt.confirmationNumber || receipt.bookingId}.pdf`,
+          content: pdfBuffer,
+          contentType: 'application/pdf',
+        },
+      ],
+    };
+
+    const resolvedFrom = mailOptions.from || fromEmail;
+    console.log('Sending receipt email - from:', resolvedFrom, 'to:', mailOptions.to);
+    const sendOpts = {
+      ...mailOptions,
+      envelope: { from: resolvedFrom, to: Array.isArray(mailOptions.to) ? mailOptions.to : [mailOptions.to] },
+    };
+
+    const info = await transporter.sendMail(sendOpts);
+    console.log('Receipt email sent:', info && info.messageId);
+    if (info && info.response) console.log('SMTP response:', info.response);
+    if (info && info.accepted) console.log('SMTP accepted:', info.accepted);
+    if (info && info.rejected) console.log('SMTP rejected:', info.rejected);
+
+    return res.json({ success: true, message: 'Receipt emailed successfully', messageId: info?.messageId });
+  } catch (err) {
+    console.error('sendReceiptEmail error:', err);
+    return res.status(500).json({ success: false, msg: err.message || 'Failed to send receipt' });
+  }
+};

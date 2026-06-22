@@ -1,0 +1,173 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Receipt</title>
+  <style>
+    /* Reset */
+    * { box-sizing: border-box; }
+    html,body { margin:0; padding:0; }
+    body { font-family: 'Helvetica Neue', Arial, Helvetica, sans-serif; color:#0f172a; background:#fff; }
+    .page { width: 800px; margin: 0 auto; padding: 28px 36px; }
+
+    /* Top success banner */
+    .success { background:#ecfdf5; border:1px solid #bbf7d0; color:#065f46; padding:18px 20px; border-radius:8px; text-align:center; font-weight:600; }
+    .success small { display:block; color:#065f46; font-weight:400; margin-top:6px; }
+
+    /* Header */
+    .header { text-align:center; margin-top:18px; }
+    .brand { font-size:34px; font-weight:700; letter-spacing:0; color:#0f172a; }
+    .tagline { color:#6b7280; margin-top:6px; font-size:13px; }
+    .receipt-badge { display:inline-block; margin-top:12px; padding:8px 14px; border-radius:20px; background:#fff; border:1px solid #e6e9ef; font-weight:600; }
+
+    /* Section titles */
+    .section-title { font-weight:700; color:#0f172a; margin:20px 0 10px; font-size:15px; border-bottom:2px solid #c9a961; padding-bottom:6px; }
+
+    /* Two-column content */
+    .content { display:flex; gap:24px; margin-top:22px; }
+    .left, .right { flex:1; }
+    .panel { background:#f9fafb; border-radius:6px; padding:14px 16px; border:1px solid #f1f3f5; }
+    .field { font-size:13px; color:#111827; margin-bottom:8px; }
+    .field .label { display:block; font-size:11px; color:#6b7280; font-weight:700; margin-bottom:3px; text-transform:uppercase; letter-spacing:0.04em; }
+
+    /* Room details table */
+    .rooms-table { width:100%; border-collapse:collapse; margin-top:8px; font-size:12px; }
+    .rooms-table th { text-align:left; font-size:11px; color:#6b7280; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; padding:6px 8px; border-bottom:2px solid #e6e9ef; }
+    .rooms-table td { padding:8px; border-bottom:1px solid #f1f3f5; color:#111827; }
+    .rooms-table .num { text-align:right; }
+
+    /* Amenities list */
+    .amenities-table { width:100%; border-collapse:collapse; margin-top:8px; font-size:12px; }
+    .amenities-table th { text-align:left; font-size:11px; color:#6b7280; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; padding:6px 8px; border-bottom:2px solid #e6e9ef; }
+    .amenities-table td { padding:8px; border-bottom:1px solid #f1f3f5; color:#111827; }
+    .amenities-table .num { text-align:right; }
+
+    /* Payment summary card */
+    .payment { margin-top:16px; border:1px solid #e6e9ef; border-radius:8px; padding:14px 16px; background:#fff; }
+    .payment h3 { margin:0 0 10px 0; font-size:15px; color:#0f172a; border-bottom:2px solid #c9a961; padding-bottom:6px; }
+    .summary { margin-top:8px; }
+    .summary-row { display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px solid #f1f3f5; font-size:13px; }
+    .summary-row.total { font-weight:700; font-size:15px; border-top:2px solid #e6e9ef; border-bottom:none; padding-top:10px; margin-top:4px; }
+    .summary-row .green { color:#16a34a; font-weight:700; }
+
+    /* Transfer card */
+    .transfer-card { margin-top:12px; border:1px solid #e6e9ef; border-radius:8px; padding:12px 14px; background:#fefce8; }
+    .transfer-card h4 { margin:0 0 8px; font-size:13px; color:#854d0e; font-weight:700; }
+    .transfer-card .field { margin-bottom:6px; }
+    .transfer-card .label { color:#92400e; }
+
+    /* Special requests */
+    .special-requests { margin-top:12px; padding:12px 14px; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px; }
+    .special-requests h4 { margin:0 0 6px; font-size:13px; color:#166534; font-weight:700; }
+    .special-requests p { margin:0; font-size:12px; color:#15803d; line-height:1.6; }
+
+    .important { margin-top:18px; padding:14px; background:#eff6ff; border-left:4px solid #93c5fd; border-radius:6px; font-size:12px; color:#0f172a; }
+
+    .footer { margin-top:18px; text-align:center; color:#6b7280; font-size:12px; }
+
+    /* Utilities */
+    .muted { color:#6b7280; font-size:12px; }
+    .spacer { height:8px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:12px; font-size:11px; font-weight:600; }
+    .badge-property { background:#dbeafe; color:#1e40af; }
+    .badge-package { background:#fef3c7; color:#92400e; }
+    .badge-status { background:#ecfdf5; color:#065f46; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="success">✓ Payment Successful! <small>Your booking has been confirmed. Here's your receipt:</small></div>
+
+    <div class="header">
+      <img src="https://res.cloudinary.com/dfaakg2ds/image/upload/v1770803318/PNG-LOGO_1_xlw56b.png" alt="The Bush Collection" style="max-width:180px; display:block; margin:0 auto 10px;" />
+      <div class="brand">The Bush Collection</div>
+      <div class="tagline">Premium Safari Experiences</div>
+      <div class="receipt-badge">Receipt #{{confirmation}}</div>
+      <div style="margin-top:8px;">
+        <span class="badge {{bookingTypeBadgeClass}}">{{bookingTypeLabel}}</span>
+        <span class="badge badge-status">{{statusLabel}}</span>
+      </div>
+    </div>
+
+    <!-- Booking & Customer Details -->
+    <div class="content">
+      <div class="left">
+        <div class="panel">
+          <div class="section-title" style="margin-top:0;">Booking Information</div>
+          <div class="field"><span class="label">Booking ID</span>{{bookingId}}</div>
+          <div class="field"><span class="label">Property</span>{{propertyName}}</div>
+          <div class="field"><span class="label">Package</span>{{packageName}}</div>
+          <div class="field"><span class="label">Check-in</span>{{checkIn}}</div>
+          <div class="field"><span class="label">Check-out</span>{{checkOut}}</div>
+          <div class="field"><span class="label">Nights</span>{{nights}}</div>
+          <div class="field"><span class="label">Total Guests</span>{{guests}}</div>
+          <div class="field"><span class="label">Adults</span>{{adults}}</div>
+          <div class="field"><span class="label">Children</span>{{children}}</div>
+        </div>
+      </div>
+
+      <div class="right">
+        <div class="panel">
+          <div class="section-title" style="margin-top:0;">Customer Details</div>
+          <div class="field"><span class="label">Name</span>{{customerName}}</div>
+          <div class="field"><span class="label">Email</span>{{customerEmail}}</div>
+          <div class="field"><span class="label">Phone</span>{{customerPhone}}</div>
+          <div class="field"><span class="label">Country Code</span>{{customerCountryCode}}</div>
+          <div class="field"><span class="label">Booking Date</span>{{bookingDate}}</div>
+          <div class="field"><span class="label">Payment Term</span>{{paymentTermLabel}}</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Room Details -->
+    {{roomsSection}}
+
+    <!-- Amenities -->
+    {{amenitiesSection}}
+
+    <!-- Airport Transfer -->
+    {{transferSection}}
+
+    <!-- Special Requests -->
+    {{specialRequestsSection}}
+
+    <!-- Payment Summary -->
+    <div class="payment">
+      <h3>Payment Summary</h3>
+      <div class="summary">
+        <div class="summary-row"><div>Base Price (Accommodation)</div><div>{{basePrice}}</div></div>
+        <div class="summary-row"><div>Amenities Total</div><div>{{amenitiesTotal}}</div></div>
+        <div class="summary-row"><div>Subtotal</div><div>{{subtotal}}</div></div>
+        <div class="summary-row"><div>Service Fee (10%)</div><div>{{serviceFee}}</div></div>
+        <div class="summary-row"><div>Taxes &amp; Fees</div><div>{{taxes}}</div></div>
+        <div class="summary-row total"><div>Grand Total</div><div>{{grandTotal}}</div></div>
+        <div class="summary-row total"><div>Amount Paid</div><div class="green">{{totalPaid}}</div></div>
+        {{depositScheduleSection}}
+      </div>
+      <div class="spacer"></div>
+      <div class="muted">Payment Method: {{paymentMethod}}</div>
+    </div>
+
+    <div class="important">
+      <div style="font-weight:700; color:#1e40af; font-size:16px;">Important Information</div>
+      <div style="margin-top:8px;">
+        <div style="font-weight:700; color:#b91c1c; margin-bottom:6px">Booking ID: <span style="font-weight:600; color:#b91c1c">{{bookingId}}</span> <small style="font-weight:400; color:#b91c1c">(Keep this for your records)</small></div>
+        <ul style="margin:8px 0 0 18px; color:#374151; line-height:1.8;">
+          <li>Please arrive at the property by <strong>3:00 PM</strong> on your check-in date</li>
+          <li>Check-out time is <strong>11:00 AM</strong></li>
+          <li>Keep this receipt for your records</li>
+          <li>For any changes or cancellations, contact us at least <strong>48 hours</strong> in advance</li>
+          <li>Emergency contact: <strong>+254 116 072 343</strong></li>
+        </ul>
+      </div>
+    </div>
+    
+    <div style="text-align:center; margin-top:18px;">
+      <img src="https://res.cloudinary.com/dfaakg2ds/image/upload/v1770803318/PNG-LOGO_1_xlw56b.png" alt="The Bush Collection logo" style="max-width:220px; display:block; margin:0 auto;" />
+    </div>
+
+    <div class="footer">Thank you for choosing The Bush Collection. For support contact support@thebushcollection.africa or call +254 116 072 343</div>
+  </div>
+</body>
+</html>
