@@ -1,6 +1,7 @@
 ﻿import express from "express";
 
 import { signup, login, adminLogin, me, forgotPassword, resetPassword, getRecentEmailSends } from "../controllers/auth.controller.js";
+import { loginLimiter, adminLoginLimiter } from "../middleware/rateLimit.js";
 const router = express.Router();
 
 /**
@@ -79,7 +80,7 @@ router.post("/signup", signup);
  *       401:
  *         description: Invalid credentials
  */
-router.post("/login", login);
+router.post("/login", loginLimiter, login);
 
 /**
  * @swagger
@@ -118,7 +119,7 @@ router.post("/login", login);
  *       401:
  *         description: Invalid credentials
  */
-router.post("/admin/login", adminLogin);
+router.post("/admin/login", adminLoginLimiter, adminLogin);
 
 /**
  * @swagger
