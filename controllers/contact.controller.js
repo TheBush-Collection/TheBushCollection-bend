@@ -91,7 +91,7 @@ async function sendContactEmails(contact) {
       </div>
       <div style="padding:20px 40px;background:#f5f0ea;text-align:center">
         <p style="font-size:11px;color:#999;margin:0 0 4px">The Bush Collection · 42 Claret Close, Silanga Road, Karen, Nairobi</p>
-        <p style="font-size:11px;color:#999;margin:0">+254 116 072 343 · info@thebushcollection.africa</p>
+        <p style="font-size:11px;color:#999;margin:0">+254 700 613165 · info@thebushcollection.africa</p>
       </div>
     </div>`;
 
