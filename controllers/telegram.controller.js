@@ -21,44 +21,75 @@ async function telegramApi(method, params) {
   return data.result;
 }
 
+// Telegram messages allow ~4096 chars, comfortably more than a 150-300 word
+// email — only clip in the unlikely case a draft runs unusually long, so
+// reviewers always see the real content rather than a chopped-off preview.
 function draftPreviewText(draft) {
-  const bodyPreview = draft.plainText.length > 500 ? `${draft.plainText.slice(0, 500)}…` : draft.plainText;
-  return `📣 *New campaign draft*\n\n*Subject:* ${draft.subject}\n\n${bodyPreview}\n\n_Brief: ${draft.brief}_`;
+  const bodyPreview = draft.plainText.length > 3200 ? `${draft.plainText.slice(0, 3200)}…` : draft.plainText;
+  return `📣 *Campaign draft*\n\n*Subject:* ${draft.subject}\n\n${bodyPreview}\n\n_Brief: ${draft.brief}_`;
 }
+
+// Photo captions are capped at 1024 chars by Telegram — much tighter than a
+// text message, so this is a shorter version used only when sending the image.
+// The full text is still always available on the admin page.
+function draftPreviewCaption(draft) {
+  const bodyPreview = draft.plainText.length > 700 ? `${draft.plainText.slice(0, 700)}…` : draft.plainText;
+  return `📣 *Campaign draft*\n\n*Subject:* ${draft.subject}\n\n${bodyPreview}`;
+}
+
+const approvalButtons = (draftId) => ({
+  inline_keyboard: [[
+    { text: "✅ Approve & Send", callback_data: `approve:${draftId}` },
+    { text: "❌ Reject", callback_data: `reject:${draftId}` },
+  ]],
+});
 
 export async function sendApprovalMessage(draft) {
   const chatId = process.env.TELEGRAM_ADMIN_CHAT_ID;
   if (!chatId) throw new Error("TELEGRAM_ADMIN_CHAT_ID not configured");
 
-  const result = await telegramApi("sendMessage", {
-    chat_id: chatId,
-    text: draftPreviewText(draft),
-    parse_mode: "Markdown",
-    reply_markup: {
-      inline_keyboard: [[
-        { text: "✅ Approve & Send", callback_data: `approve:${draft._id}` },
-        { text: "❌ Reject", callback_data: `reject:${draft._id}` },
-      ]],
-    },
-  });
+  const result = draft.imageUrl
+    ? await telegramApi("sendPhoto", {
+        chat_id: chatId,
+        photo: draft.imageUrl,
+        caption: draftPreviewCaption(draft),
+        parse_mode: "Markdown",
+        reply_markup: approvalButtons(draft._id),
+      })
+    : await telegramApi("sendMessage", {
+        chat_id: chatId,
+        text: draftPreviewText(draft),
+        parse_mode: "Markdown",
+        reply_markup: approvalButtons(draft._id),
+      });
 
   draft.telegramChatId = String(result.chat.id);
   draft.telegramMessageId = String(result.message_id);
   await draft.save();
 }
 
+// Edits a resolved draft's message to show the outcome and removes its buttons
+// (Telegram keeps the old inline keyboard on an edit unless you explicitly clear it —
+// without this, a resolved message would stay tappable). Photo messages can only be
+// edited via editMessageCaption, not editMessageText, so this branches on whether
+// the message this draft points at was sent as a photo (i.e. had an image at send-time).
 async function updateApprovalMessage(draft, extraText) {
   if (!draft.telegramChatId || !draft.telegramMessageId) return;
   try {
-    await telegramApi("editMessageText", {
-      chat_id: draft.telegramChatId,
-      message_id: Number(draft.telegramMessageId),
-      text: `${draftPreviewText(draft)}\n\n${extraText}`,
-      parse_mode: "Markdown",
-    });
+    const base = { chat_id: draft.telegramChatId, message_id: Number(draft.telegramMessageId), reply_markup: { inline_keyboard: [] } };
+    if (draft.imageUrl) {
+      await telegramApi("editMessageCaption", { ...base, caption: `${draftPreviewCaption(draft)}\n\n${extraText}`, parse_mode: "Markdown" });
+    } else {
+      await telegramApi("editMessageText", { ...base, text: `${draftPreviewText(draft)}\n\n${extraText}`, parse_mode: "Markdown" });
+    }
   } catch (err) {
-    console.error("Telegram editMessageText failed:", err);
+    console.error("Telegram message update failed:", err);
   }
+}
+
+/** Marks a draft's existing Telegram message as superseded (used when it's edited) and clears its buttons. */
+export async function supersedeApprovalMessage(draft) {
+  await updateApprovalMessage(draft, "✏️ *Edited — see the new version below.*");
 }
 
 export const handleWebhook = async (req, res) => {
@@ -115,26 +146,34 @@ export const handleWebhook = async (req, res) => {
       return;
     }
 
+    let campaignId;
     try {
-      const { campaignId } = await createAndSendCampaign({
+      ({ campaignId } = await createAndSendCampaign({
         subject: draft.subject,
         html: draft.htmlBody,
         segmentId: process.env.MAILCHIMP_TEST_SEGMENT_ID,
-      });
-      draft.status = "sent";
-      draft.mailchimpCampaignId = campaignId;
-      await draft.save();
-      await telegramApi("answerCallbackQuery", { callback_query_id: callback.id, text: "Sent!" });
-      const target = process.env.MAILCHIMP_TEST_SEGMENT_ID ? "test segment" : "full audience";
-      await updateApprovalMessage(draft, `✅ *Approved and sent to Mailchimp (${target}).*`);
+      }));
     } catch (sendErr) {
       console.error("Mailchimp send failed:", sendErr);
       draft.status = "failed";
       draft.failureReason = sendErr.message;
       await draft.save();
-      await telegramApi("answerCallbackQuery", { callback_query_id: callback.id, text: "Send failed — check logs." });
+      await telegramApi("answerCallbackQuery", { callback_query_id: callback.id, text: "Send failed — check logs." }).catch(() => {});
       await updateApprovalMessage(draft, `⚠️ *Approved, but sending failed:* ${sendErr.message}`);
+      return;
     }
+
+    // The send itself succeeded — persist that BEFORE touching Telegram again.
+    // A stale/expired callback_query (e.g. from a delayed webhook retry) must never
+    // make a real, already-sent campaign look like it failed.
+    draft.status = "sent";
+    draft.mailchimpCampaignId = campaignId;
+    await draft.save();
+    await telegramApi("answerCallbackQuery", { callback_query_id: callback.id, text: "Sent!" }).catch((err) =>
+      console.error("answerCallbackQuery failed (send already succeeded, harmless):", err)
+    );
+    const target = process.env.MAILCHIMP_TEST_SEGMENT_ID ? "test segment" : "full audience";
+    await updateApprovalMessage(draft, `✅ *Approved and sent to Mailchimp (${target}).*`);
   } catch (err) {
     console.error("Telegram webhook handling error:", err);
   }

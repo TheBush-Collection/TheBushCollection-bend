@@ -5,6 +5,7 @@ const marketingDraftSchema = new mongoose.Schema({
   subject: { type: String, required: true },
   htmlBody: { type: String, required: true },
   plainText: { type: String, required: true },
+  imageUrl: { type: String },
   status: { type: String, enum: ["pending", "approved", "rejected", "sent", "failed"], default: "pending" },
   telegramChatId: { type: String },
   telegramMessageId: { type: String },

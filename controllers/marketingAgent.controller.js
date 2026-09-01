@@ -8,7 +8,7 @@ import {
   runSearchPackages,
   runSearchProperties,
 } from "../utils/agentTools.js";
-import { sendApprovalMessage } from "./telegram.controller.js";
+import { sendApprovalMessage, supersedeApprovalMessage } from "./telegram.controller.js";
 
 const MAX_TOOL_ITERATIONS = 4;
 const MAX_BRIEF_LENGTH = 500;
@@ -20,11 +20,12 @@ Rules:
 - Warm, inviting travel-marketing tone. Not pushy, no fake urgency ("only 2 left!"), no exclamation-mark spam.
 - Subject line: under 60 characters, no ALL CAPS, no spammy words ("free", "act now").
 - Body: 150-300 words, one clear call to action linking to https://thebushcollection.africa/packages or https://thebushcollection.africa/collections as appropriate.
-- HTML body should be simple, valid, inline-styled email HTML (a wrapping <div> with a couple of <p> tags and one styled <a> button) — no external stylesheets, no <script>, no images unless you have a real image URL from a tool result.
+- HTML body should be simple, valid, inline-styled email HTML (a wrapping <div>, a couple of <p> tags, one styled <a> button) — no external stylesheets, no <script>.
+- Images: when a package or property you're writing about has a real image URL in its tool result, prefer including ONE as a hero image at the top of the email: <img src="THE_URL" alt="..." style="width:100%;max-width:600px;border-radius:6px;margin-bottom:16px;" />. Never invent or guess an image URL — only use one that came directly from a tool result. If nothing suitable came back, skip the image entirely rather than leaving a broken one.
 
 When you are done gathering information, respond with ONLY a single JSON object (no markdown fences, no other text) in exactly this shape:
-{"subject": "...", "html": "...", "plainText": "..."}
-"plainText" is the same message with all HTML tags stripped, for the campaign's plain-text alternative.`;
+{"subject": "...", "html": "...", "plainText": "...", "imageUrl": "... or null"}
+"plainText" is the same message with all HTML tags and the image stripped, for the campaign's plain-text alternative. "imageUrl" is the same URL you used in the <img> tag (or null if you didn't include one) — it's tracked separately so the image survives if a human edits the text later.`;
 
 const TOOLS = [SEARCH_PACKAGES_TOOL, SEARCH_PROPERTIES_TOOL];
 
@@ -54,8 +55,85 @@ function parseDraftJson(text) {
   if (!parsed.subject || !parsed.html || !parsed.plainText) {
     throw new Error("Response JSON missing subject/html/plainText");
   }
+  // Only trust it as an image if it's actually a URL — never let a stray string
+  // or hallucinated non-URL value end up in an <img src>.
+  if (typeof parsed.imageUrl !== "string" || !/^https?:\/\//i.test(parsed.imageUrl)) {
+    parsed.imageUrl = undefined;
+  }
   return parsed;
 }
+
+const escapeHtml = (s) =>
+  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// Turns edited plain text back into the same simple inline-styled email HTML
+// the agent generates, so staff only ever edit plain text (safe, no broken markup)
+// while the actual sent email stays in the same visual style. Re-applies the
+// draft's imageUrl (if any) so editing the wording doesn't silently drop the image.
+function plainTextToHtml(plainText, imageUrl) {
+  const paragraphs = plainText
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const escaped = escapeHtml(p).replace(/\n/g, "<br/>");
+      // Turn a lone URL-only line into the same styled CTA button the agent uses.
+      if (/^https?:\/\/\S+$/.test(p.trim())) {
+        return `<p style="margin-top: 28px;"><a href="${p.trim()}" style="display: inline-block; background-color: #8B6F47; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Learn more</a></p>`;
+      }
+      return `<p>${escaped}</p>`;
+    });
+  const imageTag = imageUrl
+    ? `<img src="${imageUrl}" alt="" style="width:100%;max-width:600px;border-radius:6px;margin-bottom:16px;" />`
+    : "";
+  return `<div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">${imageTag}${paragraphs.join("")}</div>`;
+}
+
+export const updateDraft = async (req, res) => {
+  try {
+    const draft = await MarketingDraft.findById(req.params.id);
+    if (!draft) return res.status(404).json({ message: "Draft not found." });
+    if (draft.status !== "pending" && draft.status !== "failed") {
+      return res.status(409).json({ message: `Can't edit a draft that's already ${draft.status}.` });
+    }
+
+    const subject = String(req.body?.subject || "").trim();
+    const plainText = String(req.body?.plainText || "").trim();
+    if (!subject || !plainText) {
+      return res.status(400).json({ message: "subject and plainText are required." });
+    }
+
+    // Snapshot the old message before mutating, so the "superseded" notice
+    // reflects what the draft used to say, not the new content.
+    const oldDraftSnapshot = draft.toObject();
+    if (draft.telegramMessageId) {
+      await supersedeApprovalMessage(oldDraftSnapshot);
+    }
+
+    draft.subject = subject;
+    draft.plainText = plainText;
+    draft.htmlBody = plainTextToHtml(plainText, draft.imageUrl);
+    draft.status = "pending";
+    draft.failureReason = undefined;
+    await draft.save();
+
+    try {
+      await sendApprovalMessage(draft);
+    } catch (telegramErr) {
+      console.error("Telegram send failed for edited draft", draft._id, telegramErr);
+      return res.json({
+        success: true,
+        draft,
+        warning: "Draft updated, but re-sending it to Telegram failed — check TELEGRAM_BOT_TOKEN/TELEGRAM_ADMIN_CHAT_ID.",
+      });
+    }
+
+    res.json({ success: true, draft });
+  } catch (err) {
+    console.error("updateDraft error:", err);
+    res.status(500).json({ message: "Failed to update draft." });
+  }
+};
 
 export const listDrafts = async (req, res) => {
   try {
@@ -118,6 +196,7 @@ export const generateCampaignDraft = async (req, res) => {
       subject: draftContent.subject,
       htmlBody: draftContent.html,
       plainText: draftContent.plainText,
+      imageUrl: draftContent.imageUrl,
       status: "pending",
       createdBy: req.admin?._id,
     });
