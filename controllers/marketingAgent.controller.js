@@ -188,7 +188,16 @@ export const generateCampaignDraft = async (req, res) => {
       draftContent = parseDraftJson(finalText);
     } catch (parseErr) {
       console.error("Marketing agent JSON parse failed:", parseErr, "raw:", finalText);
-      return res.status(502).json({ message: "The agent didn't return a usable draft. Try rephrasing the brief." });
+      // This usually isn't a bug — it's the agent legitimately unable to write a
+      // grounded draft (e.g. the brief mentions inventory that doesn't exist) and
+      // asking a clarifying question in plain text instead of forcing fake JSON.
+      // Surface that question rather than a generic, unhelpful error.
+      const agentMessage = finalText?.trim();
+      return res.status(422).json({
+        message: agentMessage
+          ? `The agent needs more info before it can write this: "${agentMessage}"`
+          : "The agent didn't return a usable draft. Try rephrasing the brief.",
+      });
     }
 
     const draft = await MarketingDraft.create({
