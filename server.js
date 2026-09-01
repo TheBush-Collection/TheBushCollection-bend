@@ -84,6 +84,7 @@ import contactRoutes from "./routes/contact.routes.js";
 import reviewRoutes from "./routes/review.routes.js";
 import mailchimpRoutes from "./routes/mailchimp.routes.js";
 import seasonalRateRoutes from "./routes/seasonalRate.routes.js";
+import agentRoutes from "./routes/agent.routes.js";
 
 dotenv.config();
 connectDB();
@@ -160,6 +161,7 @@ app.use("/contact", contactRoutes);
 app.use("/reviews", reviewRoutes);
 app.use("/api/mailchimp", mailchimpRoutes);
 app.use("/seasonal-rates", seasonalRateRoutes);
+app.use("/agent", agentRoutes);
 
 app.get("/", (req, res) => res.send("API is running..."));
 
