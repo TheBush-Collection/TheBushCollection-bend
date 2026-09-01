@@ -326,6 +326,70 @@ export const getRecentSubscriptions = (req, res) => {
   }
 };
 
+/**
+ * Internal helper: create a Mailchimp campaign, set its content, and send it.
+ * `segmentId` restricts the send to a saved segment/tag (used to target a small
+ * test group before ever sending to the full audience) — omit to send to the
+ * whole audience.
+ */
+export const createAndSendCampaign = async ({ subject, html, segmentId }) => {
+  if (!subject || !html) throw new Error("subject and html are required");
+  if (!MAILCHIMP_AUDIENCE_ID) throw new Error("MAILCHIMP_AUDIENCE_ID not configured");
+
+  const auth = Buffer.from(`anystring:${MAILCHIMP_API_KEY}`).toString("base64");
+  const base = `https://${MAILCHIMP_SERVER_PREFIX}.api.mailchimp.com/3.0`;
+  const headers = { Authorization: `Basic ${auth}`, "Content-Type": "application/json" };
+
+  const recipients = { list_id: MAILCHIMP_AUDIENCE_ID };
+  if (segmentId) recipients.segment_opts = { saved_segment_id: Number(segmentId) };
+
+  const createResp = await fetch(`${base}/campaigns`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      type: "regular",
+      recipients,
+      settings: {
+        subject_line: subject,
+        title: `${subject} — ${new Date().toISOString()}`,
+        from_name: "The Bush Collection",
+        reply_to: process.env.SMTP_FROM || "info@thebushcollection.africa",
+      },
+    }),
+  });
+  const campaign = await createResp.json();
+  if (!createResp.ok) {
+    const err = new Error(campaign.detail || "Failed to create Mailchimp campaign");
+    err.response = campaign;
+    throw err;
+  }
+
+  const contentResp = await fetch(`${base}/campaigns/${campaign.id}/content`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ html }),
+  });
+  if (!contentResp.ok) {
+    const contentErr = await contentResp.json().catch(() => ({}));
+    const err = new Error(contentErr.detail || "Failed to set Mailchimp campaign content");
+    err.response = contentErr;
+    throw err;
+  }
+
+  const sendResp = await fetch(`${base}/campaigns/${campaign.id}/actions/send`, {
+    method: "POST",
+    headers,
+  });
+  if (!sendResp.ok) {
+    const sendErr = await sendResp.json().catch(() => ({}));
+    const err = new Error(sendErr.detail || "Failed to send Mailchimp campaign");
+    err.response = sendErr;
+    throw err;
+  }
+
+  return { campaignId: campaign.id };
+};
+
 // Internal helper for server-side use (returns response data or throws)
 export const subscribeContactInternal = async ({ email_address, merge_fields = {}, tags = [], status = 'subscribed' }) => {
   if (!email_address) throw new Error('Email address required');
